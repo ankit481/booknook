@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 
 use crate::browser::{self, Entry};
 use crate::markdown::{self, RenderLine};
+use crate::theme::{Theme, THEMES};
+use crate::wrap::Spacing;
 
 /// Which pane currently receives keyboard input. Both panes are always
 /// drawn; this only decides where `j`, `k`, the arrow keys, and Enter go.
@@ -39,6 +41,10 @@ pub(crate) struct App {
     pub(crate) entries: Vec<Entry>,
     pub(crate) selected: usize,
     pub(crate) title: String,
+    /// The open document's raw markdown, kept so that switching themes can
+    /// reparse it. Colors are baked into `blocks` at parse time, so a new
+    /// theme means a new parse.
+    raw: String,
     /// The parsed document, not yet wrapped to any particular width.
     /// Layout happens every frame, against the current column width, in
     /// the `ui` module. This stays empty until a file has been opened.
@@ -49,8 +55,22 @@ pub(crate) struct App {
     /// current width, and read by the event handler to decide whether a
     /// page turn should move by one page or by a whole spread.
     pub(crate) spread: bool,
+    /// How the page is set: the width of a reading column, and how much
+    /// air goes between lines and between paragraphs. These are adjustable
+    /// while reading, because the right values are a matter of taste and
+    /// of the font the terminal happens to be using.
+    pub(crate) page_width: u16,
+    pub(crate) spacing: Spacing,
+    /// An index into `THEMES` rather than a `Theme` value, so that `App`
+    /// borrows the palette instead of owning a copy of it.
+    theme_index: usize,
     pub(crate) quit: bool,
 }
+
+/// The range each typographic setting is allowed to move within.
+pub(crate) const MIN_PAGE_WIDTH: u16 = 40;
+pub(crate) const MAX_PAGE_WIDTH: u16 = 96;
+pub(crate) const MAX_SPACING: u16 = 3;
 
 impl App {
     pub(crate) fn new() -> Self {
@@ -60,10 +80,32 @@ impl App {
             entries: Vec::new(),
             selected: 0,
             title: String::new(),
+            raw: String::new(),
             blocks: Vec::new(),
             page: 0,
             spread: false,
+            page_width: 58,
+            // One blank row inside a paragraph, two between paragraphs.
+            // The contrast between the two is what lets a block of text
+            // read as a block rather than as a stack of loose lines.
+            spacing: Spacing { line: 1, paragraph: 2 },
+            theme_index: 0,
             quit: false,
+        }
+    }
+
+    /// The palette currently in use. The returned reference borrows from
+    /// the `THEMES` static, not from `self`, so holding onto it does not
+    /// keep `App` borrowed.
+    pub(crate) fn theme(&self) -> &'static Theme {
+        &THEMES[self.theme_index]
+    }
+
+    /// Move to the next palette and reparse the open document with it.
+    pub(crate) fn cycle_theme(&mut self) {
+        self.theme_index = (self.theme_index + 1) % THEMES.len();
+        if !self.raw.is_empty() {
+            self.blocks = markdown::render_markdown(&self.raw, self.theme());
         }
     }
 
@@ -72,7 +114,8 @@ impl App {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("could not read {}", path.display()))?;
         self.title = path.display().to_string();
-        self.blocks = markdown::render_markdown(&raw);
+        self.blocks = markdown::render_markdown(&raw, self.theme());
+        self.raw = raw;
         self.page = 0;
         self.focus = Focus::Document;
         Ok(())

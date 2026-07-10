@@ -13,15 +13,28 @@ First, the file's text is parsed. The `markdown` module reads the raw
 markdown string with pulldown-cmark and walks its stream of events, turning
 headings, paragraphs, lists, quotes, links, and code blocks into a flat list
 of `RenderLine` values. Nothing in this step knows how wide the terminal
-is. A `RenderLine` is either `Prose`, a run of styled spans that can still
-be reflowed later, or `Verbatim`, a finished row that must never be
-rewrapped, such as a line of code or a blank line separating two blocks.
+is. A `RenderLine` is one of three things: `Prose`, a run of styled spans
+that can still be reflowed later; `Verbatim`, a finished row that must
+never be rewrapped, such as a line of code; or `Gap`, a break between two
+blocks. A `Gap` records the intention to separate, not a fixed number of
+blank rows, because how much air a break gets is a layout decision rather
+than a parsing one.
 
 Second, that list is laid out. The `wrap` module takes the blocks produced
 by parsing and fits them to a specific column width, one word at a time.
-This is also where line spacing happens: a blank row is inserted between
-every wrapped line of prose. The result is a ratatui `Text`, a plain list of
-terminal rows ready to be shown.
+This is also where spacing happens, and it applies two different numbers:
+one for the blank rows inside a wrapped paragraph, and a larger one for the
+rows between paragraphs. Those have to differ. If the gap within a
+paragraph matched the gap between paragraphs, every line would read as its
+own paragraph and the page would lose all of its structure. The result is a
+ratatui `Text`, a plain list of terminal rows ready to be shown.
+
+A word, in this module, is not the same thing as a span. pulldown-cmark
+emits smart punctuation as its own event, so `country's` arrives as three
+separate spans: `country`, then the apostrophe, then `s`. Wrapping each
+span independently and rejoining the results with spaces would render that
+as `country ’ s`. The wrapper therefore defines a word as whatever sits
+between two runs of whitespace, however many spans and styles it crosses.
 
 Third, that `Text` is rendered. The `ui` module hands it to a ratatui
 `Paragraph` widget, which draws it into a region of the screen, scrolled to
@@ -39,10 +52,12 @@ else in the app.
 
 ## Module map
 
-**`theme`** holds the color palette as a handful of constants and nothing
-else. It has no logic and depends on nothing but ratatui's color type. Any
-other module that wants to draw something in the app's palette imports from
-here.
+**`theme`** holds the color palettes and nothing else. A `Theme` is plain
+data, with no logic, depending on nothing but ratatui's color type. The
+available palettes live in a `THEMES` static, which is a `static` rather
+than a `const` so that `&THEMES[i]` borrows for `'static`. That detail
+saves every other module from threading a lifetime parameter through
+itself just to hold a reference to the current palette.
 
 **`browser`** knows how to list a directory's contents and how to tell a
 markdown file from any other kind of file. It has no idea that an `App` or
@@ -52,14 +67,18 @@ completely different interface, without touching anything else.
 
 **`markdown`** is the parsing stage described above. It depends on `theme`,
 for colors, and on pulldown-cmark, for the actual markdown grammar. Its
-only public output is `render_markdown`, which takes a string and returns a
-`Vec<RenderLine>`.
+only public output is `render_markdown`, which takes a string and a theme
+and returns a `Vec<RenderLine>`. Colors are baked into the spans here, at
+parse time, which is why switching themes reparses the open document. That
+is cheaper than carrying a semantic role on every span and resolving it
+against the palette on every frame, and documents are small enough that the
+reparse is not noticeable.
 
 **`wrap`** is the layout stage described above. It depends on `markdown`,
 for the `RenderLine` type it consumes, and on the `unicode-width` crate, to
 measure how many terminal columns each word actually occupies. Its only
-public output is `layout`, which takes a slice of blocks and a width and
-returns a ratatui `Text`.
+public output is `layout`, which takes a slice of blocks, a width, and a
+`Spacing`, and returns a ratatui `Text`.
 
 **`app`** defines the `App` struct, which is the single source of truth for
 everything the program currently knows: which directory the sidebar is
@@ -262,8 +281,17 @@ event, and pop it back off on the matching `End` event.
 A new block-level feature, such as tables, is more work, because it has to
 decide how that block behaves under `wrap::layout`. Something that should
 reflow with the rest of the paragraph belongs in a `RenderLine::Prose`
-block. Something that has its own fixed shape, the way a code block does,
-belongs in one or more `RenderLine::Verbatim` lines instead.
+block, whose `indent` and `hang` fields control where its first row and its
+continuation rows begin. Note that the word splitter discards leading
+whitespace, so an indent has to travel in that `indent` field rather than
+as spaces baked into the text. Something with its own fixed shape, the way
+a code block does, belongs in one or more `RenderLine::Verbatim` lines
+instead. A separation between blocks is a `RenderLine::Gap`, which lets
+`wrap` decide how many rows it is actually worth.
+
+A new color palette is an entry appended to the `THEMES` static in `theme`,
+and nothing else. Nothing needs to change anywhere else, because `t` cycles
+by index over whatever is in that array.
 
 A whole new pane, alongside the sidebar and the reader, would touch four
 modules. `app` would need new state for whatever that pane shows. `events`

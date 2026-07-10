@@ -15,11 +15,12 @@ use ratatui::Frame;
 
 use crate::app::{App, Focus};
 use crate::browser::is_markdown;
-use crate::theme;
+use crate::theme::Theme;
 use crate::wrap;
 
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
-    frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), frame.area());
+    let theme = app.theme();
+    frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), frame.area());
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -38,22 +39,19 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     draw_status_bar(frame, app, status_bar, page_count);
 }
 
-/// The width of one reading column, whether that is the single page or one
-/// half of a two-page spread. This is narrower than a typical 80-column
-/// terminal, closer to what a book or e-reader uses.
-const PAGE_WIDTH: u16 = 58;
 /// The gap between the two pages of a spread, like a book's spine.
 const GUTTER: u16 = 5;
 
 fn draw_document(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
+    let theme = app.theme();
     if app.blocks.is_empty() {
         app.spread = false;
         let hint = Paragraph::new(Line::from(Span::styled(
             "Select a markdown file to begin reading.",
-            Style::default().fg(theme::MUTED).add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.muted).add_modifier(Modifier::ITALIC),
         )))
         .alignment(Alignment::Center)
-        .style(Style::default().bg(theme::BG));
+        .style(Style::default().bg(theme.bg));
         frame.render_widget(hint, inset_vertical(area, area.height / 3, 0));
         return 1;
     }
@@ -62,7 +60,7 @@ fn draw_document(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     // a spread, like an open book. Otherwise fall back to one page, like a
     // phone or a narrow window would. This is the same kind of adaptive
     // behavior e-reader apps use.
-    app.spread = area.width >= PAGE_WIDTH * 2 + GUTTER;
+    app.spread = area.width >= app.page_width * 2 + GUTTER;
     if app.spread {
         draw_spread(frame, app, area)
     } else {
@@ -71,20 +69,25 @@ fn draw_document(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
 }
 
 fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
+    let theme = app.theme();
     // Generous margins keep the text off the pane's edge. The inset
     // applies on all four sides, not just top and bottom, so the page
     // reads as a page and not just a full-bleed column of text.
-    let column = centered_column(area, PAGE_WIDTH);
+    let column = centered_column(area, app.page_width);
     let reading_area = inset_horizontal(inset_vertical(column, 3, 2), 2, 2);
+
+    // The column, margins included, is painted in the page shade, so the
+    // text sits on a sheet rather than on the terminal background.
+    frame.render_widget(Block::default().style(Style::default().bg(theme.page)), column);
 
     // The document is wrapped by the `wrap` module rather than left to
     // Paragraph's own wrapping, so that a blank row can be inserted
     // between wrapped lines for real line spacing. Because this runs
     // every frame against the current width, resizing the terminal
     // reflows the text correctly for free.
-    let text = wrap::layout(&app.blocks, reading_area.width);
+    let text = wrap::layout(&app.blocks, reading_area.width, app.spacing);
     let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(theme::FG).bg(theme::BG))
+        .style(Style::default().fg(theme.fg).bg(theme.page))
         .wrap(Wrap { trim: false });
 
     // line_count() reports how many rows the text needs at this width. Our
@@ -108,13 +111,22 @@ fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
 /// here, the same way a real book's left-hand pages are always
 /// even-numbered.
 fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
-    let spread_width = (PAGE_WIDTH * 2 + GUTTER).min(area.width);
+    let theme = app.theme();
+    let spread_width = (app.page_width * 2 + GUTTER).min(area.width);
     let outer_margin = (area.width - spread_width) / 2;
     let spread = Rect { x: area.x + outer_margin, width: spread_width, ..area };
 
+    // The whole spread, gutter included, is one sheet of paper. The spine
+    // is a line drawn on it, not a gap between two separate sheets.
+    frame.render_widget(Block::default().style(Style::default().bg(theme.page)), spread);
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(PAGE_WIDTH), Constraint::Length(GUTTER), Constraint::Length(PAGE_WIDTH)])
+        .constraints([
+            Constraint::Length(app.page_width),
+            Constraint::Length(GUTTER),
+            Constraint::Length(app.page_width),
+        ])
         .split(spread);
     // Both pages get the same inset on every side, including the edge
     // facing the spine. Otherwise the gutter's own width would do all the
@@ -124,7 +136,7 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let spine_area = cols[1];
     let right_area = inset_horizontal(inset_vertical(cols[2], 3, 2), 2, 2);
 
-    let text = wrap::layout(&app.blocks, left_area.width);
+    let text = wrap::layout(&app.blocks, left_area.width, app.spacing);
     let viewport = left_area.height.max(1);
     let total_rows = text.lines.len() as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
@@ -134,7 +146,7 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
         app.page -= 1;
     }
 
-    let base_style = Style::default().fg(theme::FG).bg(theme::BG);
+    let base_style = Style::default().fg(theme.fg).bg(theme.page);
     let left = Paragraph::new(text.clone()).style(base_style).wrap(Wrap { trim: false }).scroll((app.page * viewport, 0));
     frame.render_widget(left, left_area);
 
@@ -147,20 +159,21 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     // The bar sits centered in the gutter. GUTTER is 5 columns wide, two on
     // either side of the bar itself.
     let spine: Vec<Line<'static>> =
-        (0..spine_area.height).map(|_| Line::from(Span::styled("  │  ", Style::default().fg(theme::MUTED)))).collect();
-    frame.render_widget(Paragraph::new(Text::from(spine)).style(Style::default().bg(theme::BG)), spine_area);
+        (0..spine_area.height).map(|_| Line::from(Span::styled("  │  ", Style::default().fg(theme.muted)))).collect();
+    frame.render_widget(Paragraph::new(Text::from(spine)).style(Style::default().bg(theme.page)), spine_area);
 
     page_count
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let focused = matches!(app.focus, Focus::Sidebar);
-    let border_color = if focused { theme::LINK } else { theme::MUTED };
+    let border_color = if focused { theme.link } else { theme.muted };
 
     let label = app.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| app.dir.display().to_string());
     let block = Block::bordered()
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(format!(" {label} "), Style::default().fg(theme::HEADING).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(format!(" {label} "), Style::default().fg(theme.heading).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -169,19 +182,19 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     // space.
     let mut rows: Vec<Line<'static>> = Vec::new();
     if app.dir.parent().is_some() {
-        rows.push(row_line("  ", "..", theme::MUTED, false));
+        rows.push(row_line(theme, "  ", "..", theme.muted, false));
     }
     for (i, entry) in app.entries.iter().enumerate() {
         let is_selected = i == app.selected;
         let name = if entry.is_dir { format!("{}/", entry.name) } else { entry.name.clone() };
         let color = if entry.is_dir {
-            theme::LINK
+            theme.link
         } else if is_markdown(&entry.path) {
-            theme::FG
+            theme.fg
         } else {
-            theme::MUTED
+            theme.muted
         };
-        rows.push(row_line(if is_selected { "› " } else { "  " }, &name, color, is_selected));
+        rows.push(row_line(theme, if is_selected { "› " } else { "  " }, &name, color, is_selected));
     }
 
     // The selected row is kept within view by scrolling just enough to
@@ -191,36 +204,42 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let scroll = (app.selected + 1).saturating_sub(visible) as u16;
 
     let list = Paragraph::new(Text::from(rows))
-        .style(Style::default().bg(theme::BG))
+        .style(Style::default().bg(theme.bg))
         .scroll((scroll, 0));
     frame.render_widget(list, inner);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
+    let theme = app.theme();
     let text = match app.focus {
-        Focus::Sidebar => "  ↑/↓ move · →/l open · ←/h up · Tab reader · q quit".to_string(),
+        Focus::Sidebar => {
+            format!("  ↑/↓ move · →/l open · ←/h up · Tab reader · t {} · q quit", theme.name)
+        }
         Focus::Document => {
             let position = if app.spread && app.page + 1 < page_count {
                 format!("pages {}-{}", app.page + 1, app.page + 2)
             } else {
                 format!("page {}", app.page + 1)
             };
-            format!("  {}   {position} / {page_count}   ←/→ turn page · Tab/o sidebar · q quit", app.title)
+            format!(
+                "  {position} / {page_count}   line {} · para {} · width {} · {}   [ ] {{ }} -/+ t · Tab · q",
+                app.spacing.line, app.spacing.paragraph, app.page_width, theme.name
+            )
         }
     };
     frame.render_widget(
-        Paragraph::new(Line::from(text)).style(Style::default().fg(theme::MUTED).bg(theme::BG)),
+        Paragraph::new(Line::from(text)).style(Style::default().fg(theme.muted).bg(theme.bg)),
         area,
     );
 }
 
-fn row_line(cursor: &str, label: &str, color: Color, emphasize: bool) -> Line<'static> {
+fn row_line(theme: &Theme, cursor: &str, label: &str, color: Color, emphasize: bool) -> Line<'static> {
     let mut style = Style::default().fg(color);
     if emphasize {
         style = style.add_modifier(Modifier::BOLD);
     }
     Line::from(vec![
-        Span::styled(cursor.to_string(), Style::default().fg(theme::MUTED)),
+        Span::styled(cursor.to_string(), Style::default().fg(theme.muted)),
         Span::styled(label.to_string(), style),
     ])
 }

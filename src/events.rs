@@ -7,7 +7,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, MAX_PAGE_WIDTH, MAX_SPACING, MIN_PAGE_WIDTH};
 use crate::browser::is_markdown;
 
 pub(crate) fn handle_events(app: &mut App) -> Result<()> {
@@ -34,6 +34,10 @@ pub(crate) fn handle_events(app: &mut App) -> Result<()> {
                 Focus::Sidebar => Focus::Document,
                 Focus::Document => Focus::Sidebar,
             };
+            return Ok(());
+        }
+        KeyCode::Char('t') => {
+            app.cycle_theme();
             return Ok(());
         }
         _ => {}
@@ -100,6 +104,17 @@ fn handle_document_key(app: &mut App, code: KeyCode) {
         // lets the draw step clamp it to something real.
         KeyCode::Char('G') => app.page = u16::MAX,
         KeyCode::Char('o') => app.focus = Focus::Sidebar,
+
+        // Typography, adjustable while reading. Changing any of these
+        // reflows the document on the next frame, which can move the text
+        // currently on screen onto a different page, so they deliberately
+        // leave `page` alone rather than trying to preserve a position.
+        KeyCode::Char('[') => app.spacing.line = app.spacing.line.saturating_sub(1),
+        KeyCode::Char(']') => app.spacing.line = (app.spacing.line + 1).min(MAX_SPACING),
+        KeyCode::Char('{') => app.spacing.paragraph = app.spacing.paragraph.saturating_sub(1),
+        KeyCode::Char('}') => app.spacing.paragraph = (app.spacing.paragraph + 1).min(MAX_SPACING),
+        KeyCode::Char('-') => app.page_width = app.page_width.saturating_sub(2).max(MIN_PAGE_WIDTH),
+        KeyCode::Char('=' | '+') => app.page_width = (app.page_width + 2).min(MAX_PAGE_WIDTH),
         _ => {}
     }
 }
