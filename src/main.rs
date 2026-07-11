@@ -5,7 +5,9 @@
 mod app;
 mod browser;
 mod events;
+mod gist;
 mod markdown;
+mod pr;
 mod session;
 mod theme;
 mod ui;
@@ -48,12 +50,36 @@ fn main() -> Result<()> {
     result
 }
 
-/// Decide what to show on launch. An explicit path always wins: a directory
-/// opens the browser there, a file opens the reader. With no argument, the
-/// document from last time is reopened at its remembered page, the way a
-/// Kindle returns to the book it was closed on. If nothing was open before,
-/// or that file has since gone, browsing starts from the current directory.
+/// Decide what to show on launch. An explicit argument always wins: a gist or
+/// other markdown URL is fetched and read, a directory opens the browser
+/// there, and a file opens the reader. With no argument, the document from
+/// last time is reopened at its remembered page, the way a Kindle returns to
+/// the book it was closed on. If nothing was open before, or that file has
+/// since gone, browsing starts from the current directory.
 fn open_initial(app: &mut App, session: &Session) -> Result<()> {
+    // A URL is handled before the path branches, since it is neither a
+    // directory nor a file to canonicalize. The sidebar still needs
+    // somewhere to point, both panes are always drawn, so it lists the
+    // current directory while the reader shows the fetched document.
+    //
+    // A pull-request link is checked before a plain remote link, because a PR
+    // URL is also an https URL: it needs the authenticated `gh` path, not the
+    // anonymous fetch a gist uses.
+    if let Some(arg) = std::env::args().nth(1) {
+        if pr::looks_like_pr(&arg) {
+            let (title, raw) = pr::fetch(&arg)?;
+            app.enter_dir(std::env::current_dir()?);
+            app.load_content(raw, title);
+            return Ok(());
+        }
+        if gist::looks_remote(&arg) {
+            let raw = gist::fetch(&arg)?;
+            app.enter_dir(std::env::current_dir()?);
+            app.load_content(raw, gist::title(&arg));
+            return Ok(());
+        }
+    }
+
     match std::env::args().nth(1).map(PathBuf::from) {
         Some(path) if path.is_dir() => app.enter_dir(path),
         Some(path) => {
