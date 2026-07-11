@@ -37,11 +37,13 @@ gap between paragraphs. Those are three different numbers, and getting the
 relationship between them right is most of what separates a page from a
 transcript.
 
-**Ink, not syntax highlighting.** Six palettes, cycled with a keypress, from
-a cool Tokyo Night to a near-monochrome Ink to a genuinely light Paper to the
-warm cream of Kindle's Sepia. The reading column sits on its own slightly
-lighter shade, so the text rests on a sheet instead of bleeding into the
-terminal background.
+**Ink, not syntax highlighting.** Fifteen palettes, cycled with a keypress:
+the reading-room classics the editor world already settled on, Solarized,
+Gruvbox, Catppuccin, Kanagawa, Rosé Pine, Flexoki, One Dark, Dracula, and
+Tokyo Night, alongside a genuinely light Paper, the warm cream of Kindle's
+Sepia, and a dim amber Nocturne for reading in the dark. The reading column
+sits on its own slightly lighter shade, so the text rests on a sheet instead
+of bleeding into the terminal background.
 
 **Keyboard only.** Real e-readers have buttons, not pointers. Mouse support
 was left out on purpose.
