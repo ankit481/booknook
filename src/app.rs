@@ -178,6 +178,37 @@ impl App {
         Ok(())
     }
 
+    /// Open already-fetched text in the reader, the way `load_file` opens a
+    /// file, but without a path behind it. This is how a gist is shown: the
+    /// bytes have already come off the network, so there is nothing to read
+    /// from disk. `title` is whatever should appear in the reader's header in
+    /// place of a filename.
+    ///
+    /// `current` is deliberately left `None`. A gist has no canonical path, so
+    /// it is neither remembered as the file to reopen next launch nor given an
+    /// entry in the per-file position map; both of those are keyed by path.
+    /// The trade-off is that a gist always opens on its first page, which is
+    /// the right default for something reached by pasting a link rather than
+    /// returned to like a book on a shelf.
+    pub(crate) fn load_content(&mut self, raw: String, title: String) {
+        // Fold away the previously open file's page before replacing it, the
+        // same courtesy `load_file` extends, so opening a gist mid-session
+        // does not lose the place in whatever was open before.
+        self.remember_position();
+
+        let parsed = markdown::render_markdown(&raw, self.theme());
+        self.title = title;
+        self.current = None;
+        self.blocks = parsed.blocks;
+        self.headings = parsed.headings;
+        self.raw = raw;
+        self.toc_selected = 0;
+        self.active_heading = None;
+        self.pending_jump = None;
+        self.page = 0;
+        self.focus = Focus::Document;
+    }
+
     /// Point the sidebar at `dir` and list its contents.
     pub(crate) fn enter_dir(&mut self, dir: PathBuf) {
         self.entries = browser::list_dir(&dir);
