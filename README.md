@@ -37,10 +37,11 @@ gap between paragraphs. Those are three different numbers, and getting the
 relationship between them right is most of what separates a page from a
 transcript.
 
-**Ink, not syntax highlighting.** Five palettes, cycled with a keypress, from
-a cool Tokyo Night to a near-monochrome Ink to a genuinely light Paper. The
-reading column sits on its own slightly lighter shade, so the text rests on a
-sheet instead of bleeding into the terminal background.
+**Ink, not syntax highlighting.** Six palettes, cycled with a keypress, from
+a cool Tokyo Night to a near-monochrome Ink to a genuinely light Paper to the
+warm cream of Kindle's Sepia. The reading column sits on its own slightly
+lighter shade, so the text rests on a sheet instead of bleeding into the
+terminal background.
 
 **Keyboard only.** Real e-readers have buttons, not pointers. Mouse support
 was left out on purpose.
@@ -52,12 +53,19 @@ was left out on purpose.
   unordered lists, and links
 - An always-visible file browser sidebar, so you can move between documents
   without leaving the reader
+- A table of contents below the browser, drawn from the open document's
+  headings, that jumps straight to any of them and marks where you are
+- Remembers your place. Every document reopens on the page you left it on,
+  the way a Kindle returns to the book you were reading, and launching with
+  no argument reopens the last file you had open
 - Automatic two-page spread on wide terminals, single page on narrow ones
 - Live typography controls: column width, line spacing, and paragraph
   spacing, all adjustable while reading
-- Five color themes, cycled with a single key
+- Six color themes, cycled with a single key, including Kindle-style sepia
 - Correct handling of smart punctuation, so `country's` and `$78.02` render
   as words rather than as fragments with spaces wedged into them
+- Code blocks and ASCII diagrams keep their exact shape, clipped at the page
+  edge rather than reflowed, so their alignment survives
 
 ## Install
 
@@ -73,11 +81,13 @@ The binary lands in `target/release/booknook`.
 
 ## Usage
 
-With no arguments, booknook opens the file browser in the current directory.
-Pass a path to open a file directly, or to start browsing somewhere specific.
+With no arguments, booknook reopens the last document you had open, on the
+page you left it on. The very first time, with nothing yet remembered, it
+opens the file browser in the current directory instead. Pass a path to open
+a file directly, or to start browsing somewhere specific.
 
 ```sh
-booknook                    # browse from here
+booknook                    # reopen where you left off
 booknook path/to/notes      # browse a folder
 booknook path/to/file.md    # open a document
 ```
@@ -88,17 +98,26 @@ Available anywhere:
 
 | Key | Action |
 |---|---|
-| `Tab` | Move focus between the sidebar and the reader |
+| `Tab` | Move focus: files, then contents, then the reader, then back |
 | `t` | Cycle color theme |
 | `q` / `Esc` | Quit |
 
-In the sidebar:
+In the file browser:
 
 | Key | Action |
 |---|---|
 | `↑` `↓` or `k` `j` | Move the selection |
 | `→` / `l` / `Enter` | Open a folder or a markdown file |
 | `←` / `h` / `Backspace` | Go up to the parent folder |
+
+In the contents list:
+
+| Key | Action |
+|---|---|
+| `↑` `↓` or `k` `j` | Move the selection |
+| `→` / `l` / `Enter` / space | Jump the reader to that heading |
+| `g` / `G` | Jump to the first or last heading |
+| `←` / `h` / `Backspace` | Back to the file browser |
 
 In the reader:
 
@@ -110,7 +129,7 @@ In the reader:
 | `-` / `+` | Narrow or widen the reading column |
 | `[` / `]` | Less or more space between lines |
 | `{` / `}` | Less or more space between paragraphs |
-| `o` | Back to the sidebar |
+| `o` | Back to the file browser |
 
 ## Getting the page right
 
@@ -148,10 +167,23 @@ window-padding-y = 14
 window-padding-balance = true
 ```
 
-Once your terminal is doing the leading, press `[` inside booknook until the
-line spacing reads `0`, and `{` until the paragraph spacing reads `1`. Real
-leading from the terminal plus paragraph gaps from booknook is as close to a
-printed page as a terminal gets.
+booknook now starts with line spacing `0` and paragraph spacing `1`, which is
+where you want it. The reason is worth stating, because it is the single
+biggest thing separating comfortable reading from tiring reading. Legibility
+research puts the ideal leading for body text at roughly 1.2 to 1.45 times the
+type size. A terminal cell already carries whatever leading your emulator is
+set to, so a single-spaced paragraph sits right in that band. Insert a blank
+row between every line and the leading jumps past 2.0, and at that point the
+eye can no longer make the return sweep to the start of the next line
+reliably. It overshoots, has to re-fixate, and the rhythm that lets you read
+without noticing you are reading breaks down. That is the loose, hard-to-focus
+feeling of over-spaced text. So the terminal supplies the leading, and
+booknook supplies only the larger gap between paragraphs, which is what your
+eye actually uses to tell one block from the next.
+
+If your terminal is not doing the leading and the lines feel cramped, press
+`]` to add a blank row back. And if you prefer more air, it is one keystroke
+away. The default is the recommendation, not a lock.
 
 For the typeface itself, prefer a humanist monospace designed with reading in
 mind over one designed for telling `l` from `1` at eight points. IBM Plex

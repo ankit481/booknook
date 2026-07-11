@@ -4,7 +4,7 @@
 //! draws. A couple of functions take `&mut App`, because they need to
 //! clamp a value like the current page once the true page count is known,
 //! but nothing here changes application state beyond that kind of
-//! clamping. Turning input into state changes is the `events` module's
+//! bookkeeping. Turning input into state changes is the `events` module's
 //! job.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -30,22 +30,31 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(30), Constraint::Min(1)])
+        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
         .split(body);
     let (sidebar_area, doc_area) = (cols[0], cols[1]);
 
-    draw_sidebar(frame, app, sidebar_area);
+    // The document is drawn first on purpose. Laying it out is what reveals
+    // which heading the current page falls under, and the sidebar's contents
+    // list wants that answer to highlight the right entry. Drawing the reader
+    // first means the sidebar sees this frame's value, not last frame's.
     let page_count = draw_document(frame, app, doc_area);
+    draw_sidebar(frame, app, sidebar_area);
     draw_status_bar(frame, app, status_bar, page_count);
 }
 
 /// The gap between the two pages of a spread, like a book's spine.
 const GUTTER: u16 = 5;
 
+/// How wide the left sidebar is. Wide enough for the file browser and for the
+/// contents list to show most headings on a single line before wrapping.
+const SIDEBAR_WIDTH: u16 = 34;
+
 fn draw_document(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let theme = app.theme();
     if app.blocks.is_empty() {
         app.spread = false;
+        app.active_heading = None;
         let hint = Paragraph::new(Line::from(Span::styled(
             "Select a markdown file to begin reading.",
             Style::default().fg(theme.muted).add_modifier(Modifier::ITALIC),
@@ -85,8 +94,8 @@ fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     // between wrapped lines for real line spacing. Because this runs
     // every frame against the current width, resizing the terminal
     // reflows the text correctly for free.
-    let text = wrap::layout(&app.blocks, reading_area.width, app.spacing);
-    let paragraph = Paragraph::new(text)
+    let laid = wrap::layout(&app.blocks, reading_area.width, app.spacing);
+    let paragraph = Paragraph::new(laid.text)
         .style(Style::default().fg(theme.fg).bg(theme.page))
         .wrap(Wrap { trim: false });
 
@@ -98,7 +107,10 @@ fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let viewport = reading_area.height.max(1);
     let total_rows = paragraph.line_count(reading_area.width) as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
+
+    apply_pending_jump(app, &laid.block_rows, viewport);
     app.page = app.page.min(page_count - 1);
+    update_active_heading(app, &laid.block_rows, viewport);
 
     let reader = paragraph.scroll((app.page * viewport, 0));
     frame.render_widget(reader, reading_area);
@@ -136,15 +148,18 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let spine_area = cols[1];
     let right_area = inset_horizontal(inset_vertical(cols[2], 3, 2), 2, 2);
 
-    let text = wrap::layout(&app.blocks, left_area.width, app.spacing);
+    let laid = wrap::layout(&app.blocks, left_area.width, app.spacing);
+    let text = laid.text;
     let viewport = left_area.height.max(1);
     let total_rows = text.lines.len() as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
 
+    apply_pending_jump(app, &laid.block_rows, viewport);
     app.page = app.page.min(page_count.saturating_sub(1));
     if app.page % 2 == 1 {
         app.page -= 1;
     }
+    update_active_heading(app, &laid.block_rows, viewport);
 
     let base_style = Style::default().fg(theme.fg).bg(theme.page);
     let left = Paragraph::new(text.clone()).style(base_style).wrap(Wrap { trim: false }).scroll((app.page * viewport, 0));
@@ -165,9 +180,75 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     page_count
 }
 
+/// A jump requested from the contents list, resolved to a page. The event
+/// handler only knows the target block; the row that block lands on, and so
+/// the page it belongs to, is not known until layout has run at the current
+/// width. This is where that becomes a real page number, after which the
+/// request is cleared so it fires exactly once.
+fn apply_pending_jump(app: &mut App, block_rows: &[u16], viewport: u16) {
+    if let Some(block) = app.pending_jump.take() {
+        let row = block_rows.get(block).copied().unwrap_or(0);
+        app.page = row / viewport;
+    }
+}
+
+/// Work out which heading the page on screen falls under, and record it so
+/// the contents list can highlight that entry. The active heading is the last
+/// one whose first row has already scrolled into or above the visible
+/// window. Headings and their rows both run in document order, so the search
+/// can stop at the first heading that has not appeared yet.
+fn update_active_heading(app: &mut App, block_rows: &[u16], viewport: u16) {
+    if app.headings.is_empty() {
+        app.active_heading = None;
+        return;
+    }
+    // A spread shows two pages at once, so the right-hand page counts as
+    // visible too when deciding what the reader is currently looking at.
+    let pages_shown = if app.spread { 2 } else { 1 };
+    let bottom = (app.page as u32 + pages_shown) * viewport as u32;
+
+    let mut active = None;
+    for (i, heading) in app.headings.iter().enumerate() {
+        let row = block_rows.get(heading.block).copied().unwrap_or(0) as u32;
+        if row < bottom {
+            active = Some(i);
+        } else {
+            break;
+        }
+    }
+    app.active_heading = active;
+}
+
+/// The sidebar holds two stacked lists: the file browser on top, and the
+/// open document's table of contents below it. The contents list only
+/// appears once there is a document with headings to show; until then the
+/// file browser has the whole pane to itself.
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    if app.headings.is_empty() {
+        draw_files(frame, app, area);
+        return;
+    }
+
+    // The contents list is sized to the rows it actually needs once headings
+    // are wrapped, so a document whose titles wrap gets a taller box rather
+    // than a scrollbar it did not need. It is capped at roughly two thirds of
+    // the pane so the file browser is never crowded out entirely, and the
+    // browser takes whatever is left, with a floor so it never vanishes.
+    let inner_width = area.width.saturating_sub(2);
+    let needed = toc_row_count(app, inner_width) as u16 + 2;
+    let cap = (area.height * 2 / 3).max(3);
+    let toc_height = needed.min(cap).max(3);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(toc_height)])
+        .split(area);
+    draw_files(frame, app, rows[0]);
+    draw_toc(frame, app, rows[1]);
+}
+
+fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let focused = matches!(app.focus, Focus::Sidebar);
+    let focused = matches!(app.focus, Focus::Files);
     let border_color = if focused { theme.link } else { theme.muted };
 
     let label = app.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| app.dir.display().to_string());
@@ -185,7 +266,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         rows.push(row_line(theme, "  ", "..", theme.muted, false));
     }
     for (i, entry) in app.entries.iter().enumerate() {
-        let is_selected = i == app.selected;
+        let is_selected = focused && i == app.selected;
         let name = if entry.is_dir { format!("{}/", entry.name) } else { entry.name.clone() };
         let color = if entry.is_dir {
             theme.link
@@ -209,11 +290,132 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(list, inner);
 }
 
+/// The open document's headings, as a jump list. The entry the reader is
+/// currently under is drawn in the heading color, so the contents list
+/// doubles as a "you are here" marker, not just a way to navigate. When the
+/// pane has focus, a cursor marks the entry a jump would land on.
+///
+/// A heading too long for the pane wraps onto continuation lines rather than
+/// being clipped at the edge, so no title is ever cut off mid-word.
+fn draw_toc(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let focused = matches!(app.focus, Focus::Toc);
+    let border_color = if focused { theme.link } else { theme.muted };
+
+    let block = Block::bordered()
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(" Contents ", Style::default().fg(theme.heading).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let width = inner.width as usize;
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    // Where each heading's first rendered row begins, so the cursor can be
+    // scrolled into view once wrapping makes the row count exceed the
+    // heading count.
+    let mut heading_starts: Vec<usize> = Vec::with_capacity(app.headings.len());
+
+    for (i, heading) in app.headings.iter().enumerate() {
+        heading_starts.push(rows.len());
+
+        let is_selected = focused && i == app.toc_selected;
+        let is_active = app.active_heading == Some(i);
+        let color = if is_selected {
+            theme.fg
+        } else if is_active {
+            theme.heading
+        } else {
+            theme.muted
+        };
+        let mut style = Style::default().fg(color);
+        if is_selected || is_active {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+
+        // Deeper headings sit further in, so the list reads as an outline
+        // rather than a flat run of titles. The text wraps into whatever
+        // room is left after the two-column cursor and that indent.
+        let indent = 2 * heading.level.saturating_sub(1) as usize;
+        let text_width = width.saturating_sub(2 + indent).max(1);
+        for (row, segment) in wrap_text(&heading.text, text_width).into_iter().enumerate() {
+            // Only the first row carries the cursor; continuation rows align
+            // under the heading's own text.
+            let cursor = if row == 0 && is_selected { "› " } else { "  " };
+            rows.push(Line::from(vec![
+                Span::styled(cursor.to_string(), Style::default().fg(theme.muted)),
+                Span::styled(format!("{}{segment}", " ".repeat(indent)), style),
+            ]));
+        }
+    }
+
+    // Keep the selected heading in view: scroll just enough to bring its last
+    // row onto the pane, but never past its first row, so a heading taller
+    // than the pane still shows its start.
+    let visible = inner.height.max(1) as usize;
+    let first = heading_starts.get(app.toc_selected).copied().unwrap_or(0);
+    let next = heading_starts.get(app.toc_selected + 1).copied().unwrap_or(rows.len());
+    let last = next.saturating_sub(1);
+    let scroll = last.saturating_sub(visible.saturating_sub(1)).min(first) as u16;
+
+    let list = Paragraph::new(Text::from(rows))
+        .style(Style::default().bg(theme.bg))
+        .scroll((scroll, 0));
+    frame.render_widget(list, inner);
+}
+
+/// The number of rows the contents list needs at a given inner width, once
+/// every heading is wrapped. Used to size the contents box so it grows to fit
+/// its content rather than clipping it.
+fn toc_row_count(app: &App, inner_width: u16) -> usize {
+    let width = inner_width as usize;
+    app.headings
+        .iter()
+        .map(|heading| {
+            let indent = 2 * heading.level.saturating_sub(1) as usize;
+            let text_width = width.saturating_sub(2 + indent).max(1);
+            wrap_text(&heading.text, text_width).len()
+        })
+        .sum()
+}
+
+/// Greedy word wrap of a plain string to `width` columns. A word longer than
+/// the whole width is left on its own line rather than split, since a clipped
+/// long word in a heading is rare and less jarring than a hard break through
+/// the middle of one. Always returns at least one line.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let needed = if current_len == 0 { word_len } else { current_len + 1 + word_len };
+        if needed > width && current_len > 0 {
+            lines.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        if current_len > 0 {
+            current.push(' ');
+            current_len += 1;
+        }
+        current.push_str(word);
+        current_len += word_len;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
     let theme = app.theme();
     let text = match app.focus {
-        Focus::Sidebar => {
-            format!("  ↑/↓ move · →/l open · ←/h up · Tab reader · t {} · q quit", theme.name)
+        Focus::Files => {
+            let next = if app.headings.is_empty() { "reader" } else { "contents" };
+            format!("  ↑/↓ move · →/l open · ←/h up · Tab {next} · t {} · q quit", theme.name)
+        }
+        Focus::Toc => {
+            format!("  ↑/↓ move · →/l/Enter jump · ←/h files · Tab reader · t {} · q quit", theme.name)
         }
         Focus::Document => {
             let position = if app.spread && app.page + 1 < page_count {
@@ -274,5 +476,93 @@ fn inset_horizontal(area: Rect, left: u16, right: u16) -> Rect {
         x: area.x + left.min(area.width),
         width: area.width - shrink,
         ..area
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+    use crate::markdown;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Flatten a rendered frame's cells into one string. Text within a single
+    /// row stays contiguous, which is all the assertions below need.
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+    }
+
+    /// A full frame render, headless, exercising the real draw path: the
+    /// contents box appears in the sidebar and lists the document's headings,
+    /// and the reader shows the body. This is the closest thing to launching
+    /// the app that runs without a terminal.
+    #[test]
+    fn renders_contents_list_alongside_the_reader() {
+        let mut app = App::new();
+        let doc = "# Chapter One\n\nSome body text here.\n\n## A Section\n\nMore text.\n";
+        let parsed = markdown::render_markdown(doc, app.theme());
+        app.blocks = parsed.blocks;
+        app.headings = parsed.headings;
+        app.title = "test.md".into();
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = screen(&terminal);
+        assert!(text.contains("Contents"), "sidebar should show the contents box:\n{text}");
+        assert!(text.contains("Chapter One"), "the H1 should appear:\n{text}");
+        assert!(text.contains("A Section"), "the H2 should appear:\n{text}");
+        assert!(text.contains("Some body text"), "the reader should show the body:\n{text}");
+    }
+
+    /// Selecting a heading in the contents list turns the page to it. The
+    /// event handler only records the target block; this confirms the draw
+    /// step resolves that block to a real page and clears the request. A very
+    /// short terminal forces a tiny viewport, so the second heading genuinely
+    /// lands past the first page.
+    #[test]
+    fn a_pending_jump_turns_to_the_heading_page() {
+        let mut app = App::new();
+        let doc = "# Chapter One\n\nSome body text here.\n\n## A Section\n\nMore text.\n";
+        let parsed = markdown::render_markdown(doc, app.theme());
+        app.blocks = parsed.blocks;
+        app.headings = parsed.headings;
+        // Ask to jump to the second heading, as choosing it in the sidebar would.
+        app.pending_jump = Some(app.headings[1].block);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert!(app.page >= 1, "the jump should leave the first page, landed on {}", app.page);
+        assert_eq!(app.pending_jump, None, "the jump request should be consumed");
+        assert_eq!(app.active_heading, Some(1), "the second heading should now be the active one");
+    }
+
+    #[test]
+    fn wrap_text_packs_words_and_never_splits_them() {
+        assert_eq!(wrap_text("alpha beta gamma", 11), vec!["alpha beta", "gamma"]);
+        // A single word wider than the column is left whole rather than cut.
+        assert_eq!(wrap_text("supercalifragilistic", 8), vec!["supercalifragilistic"]);
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    /// A heading too long for the sidebar must appear in full across wrapped
+    /// rows, not be clipped at the edge. The last word of a long title is the
+    /// proof: if wrapping worked, it is on screen somewhere.
+    #[test]
+    fn a_long_heading_wraps_instead_of_clipping() {
+        let mut app = App::new();
+        let doc = "# When intelligence itself becomes the product being shipped\n\nBody.\n";
+        let parsed = markdown::render_markdown(doc, app.theme());
+        app.blocks = parsed.blocks;
+        app.headings = parsed.headings;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        // "shipped" only reaches the screen if the title wrapped; at 34
+        // columns it would otherwise be clipped long before the last word.
+        assert!(screen(&terminal).contains("shipped"), "the full heading should wrap into view");
     }
 }

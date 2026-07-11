@@ -6,7 +6,7 @@
 //! module takes that list and fits it to whatever column width the reader
 //! is currently showing.
 
-use pulldown_cmark::{CodeBlockKind, Event as MdEvent, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -43,6 +43,28 @@ pub(crate) enum RenderLine {
     Gap,
 }
 
+/// One entry in the document's table of contents.
+///
+/// `block` is the index into the parsed `blocks` where this heading's text
+/// lands, which is what lets the sidebar's contents list jump straight to it.
+/// A block index survives reflow: the row a heading sits on changes with the
+/// column width, but which block it is does not, so the index is resolved to
+/// a page only at draw time, against the current layout.
+pub(crate) struct Heading {
+    pub(crate) level: u8,
+    pub(crate) text: String,
+    pub(crate) block: usize,
+}
+
+/// The result of parsing a document: its blocks, ready to be wrapped, and a
+/// flat table of contents drawn from its headings. Both come out of a single
+/// pass, so the contents list can never drift out of step with the blocks it
+/// points into.
+pub(crate) struct Parsed {
+    pub(crate) blocks: Vec<RenderLine>,
+    pub(crate) headings: Vec<Heading>,
+}
+
 /// The leading marker for a quoted line, reused for every paragraph inside
 /// a blockquote so that multi-paragraph quotes stay marked throughout.
 fn quote_marker(theme: &Theme) -> Span<'static> {
@@ -68,10 +90,11 @@ fn quote_marker(theme: &Theme) -> Span<'static> {
 /// Documents are small and parsing is fast, so this is cheaper than
 /// carrying a semantic role on every span and resolving it on every
 /// frame.
-pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Vec<RenderLine> {
+pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Parsed {
     let parser = Parser::new_ext(input, Options::all());
 
     let mut blocks: Vec<RenderLine> = Vec::new();
+    let mut headings: Vec<Heading> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut style_stack: Vec<Style> = Vec::new();
     let mut style = Style::default();
@@ -80,12 +103,17 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Vec<RenderLine> {
     let mut in_code_block = false;
     let mut indent = 0u16;
     let mut hang = 0u16;
+    // The level of the heading currently being read, if any. Set when a
+    // heading opens and taken back out when it closes, at which point the
+    // text collected in `spans` is what the contents list should show.
+    let mut heading_level: Option<u8> = None;
 
     for ev in parser {
         match ev {
             MdEvent::Start(tag) => match tag {
-                Tag::Heading { .. } => {
+                Tag::Heading { level, .. } => {
                     flush_prose(&mut blocks, &mut spans, indent, hang);
+                    heading_level = Some(heading_level_to_u8(level));
                     style_stack.push(style);
                     style = style.fg(theme.heading).add_modifier(Modifier::BOLD);
                 }
@@ -159,6 +187,20 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Vec<RenderLine> {
             },
             MdEvent::End(tag) => match tag {
                 TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::Item => {
+                    // A heading's text is exactly the spans gathered since it
+                    // opened. Record it, along with the index of the block
+                    // that `flush_prose` is about to push, before the flush
+                    // happens: at this moment `blocks.len()` is that block's
+                    // future position.
+                    if let TagEnd::Heading(_) = tag
+                        && let Some(level) = heading_level.take()
+                    {
+                        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+                        let text = text.trim().to_string();
+                        if !text.is_empty() {
+                            headings.push(Heading { level, text, block: blocks.len() });
+                        }
+                    }
                     flush_prose(&mut blocks, &mut spans, indent, hang);
                     indent = 0;
                     hang = 0;
@@ -231,7 +273,20 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Vec<RenderLine> {
         }
     }
     flush_prose(&mut blocks, &mut spans, indent, hang);
-    blocks
+    Parsed { blocks, headings }
+}
+
+/// pulldown-cmark models heading depth as an enum rather than a number. The
+/// contents list wants a plain level to indent by, so this flattens it.
+fn heading_level_to_u8(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
 }
 
 /// Move whatever spans have been collected into a finished prose block.
@@ -240,5 +295,43 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Vec<RenderLine> {
 fn flush_prose(blocks: &mut Vec<RenderLine>, spans: &mut Vec<Span<'static>>, indent: u16, hang: u16) {
     if !spans.is_empty() {
         blocks.push(RenderLine::Prose { spans: std::mem::take(spans), indent, hang });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::THEMES;
+
+    /// The text of a `Prose` block, joined across its spans and trimmed, or
+    /// `None` if the block at that index is not prose.
+    fn prose_text(blocks: &[RenderLine], index: usize) -> Option<String> {
+        match blocks.get(index) {
+            Some(RenderLine::Prose { spans, .. }) => {
+                Some(spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Headings come out in document order, carry the right level, and each
+    /// `block` index points at the prose block holding that heading's text.
+    /// That last part is the contract the sidebar's jump-to-heading relies
+    /// on: follow the index and you land on the heading itself.
+    #[test]
+    fn headings_record_level_text_and_their_block() {
+        let input = "# Title\n\nSome body text.\n\n## A Subsection\n\nMore text.\n";
+        let parsed = render_markdown(input, &THEMES[0]);
+
+        assert_eq!(parsed.headings.len(), 2);
+        assert_eq!(parsed.headings[0].level, 1);
+        assert_eq!(parsed.headings[0].text, "Title");
+        assert_eq!(parsed.headings[1].level, 2);
+        assert_eq!(parsed.headings[1].text, "A Subsection");
+
+        // The recorded block index must resolve back to the heading's text.
+        for heading in &parsed.headings {
+            assert_eq!(prose_text(&parsed.blocks, heading.block).as_deref(), Some(heading.text.as_str()));
+        }
     }
 }

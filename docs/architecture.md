@@ -68,27 +68,47 @@ completely different interface, without touching anything else.
 **`markdown`** is the parsing stage described above. It depends on `theme`,
 for colors, and on pulldown-cmark, for the actual markdown grammar. Its
 only public output is `render_markdown`, which takes a string and a theme
-and returns a `Vec<RenderLine>`. Colors are baked into the spans here, at
-parse time, which is why switching themes reparses the open document. That
-is cheaper than carrying a semantic role on every span and resolving it
-against the palette on every frame, and documents are small enough that the
-reparse is not noticeable.
+and returns a `Parsed`: the `Vec<RenderLine>` to lay out, plus a flat list
+of the document's headings for the table of contents. Both come from one
+pass, so the contents list can never drift out of step with the blocks it
+points into. Each heading records the index of the block that holds its
+text, which is the handle the sidebar later uses to jump to it. Colors are
+baked into the spans here, at parse time, which is why switching themes
+reparses the open document. That is cheaper than carrying a semantic role on
+every span and resolving it against the palette on every frame, and
+documents are small enough that the reparse is not noticeable.
 
 **`wrap`** is the layout stage described above. It depends on `markdown`,
 for the `RenderLine` type it consumes, and on the `unicode-width` crate, to
 measure how many terminal columns each word actually occupies. Its only
 public output is `layout`, which takes a slice of blocks, a width, and a
-`Spacing`, and returns a ratatui `Text`.
+`Spacing`, and returns a `Laid`: the ratatui `Text` to draw, plus a
+`block_rows` vector giving the row each input block starts on. That second
+value is what turns a heading's block index into a page: divide its row by
+the viewport height and you have the page it falls on. Because layout runs
+every frame at the current width, this mapping is always correct for the
+width on screen right now.
+
+**`session`** knows how to read and write the small file that remembers, between
+runs, the last document opened, the page reached in every document seen so
+far, and the typographic settings in force. Like `theme` and `browser`, it
+depends on nothing above it and has no idea an `App` exists. Its format is a
+plain, line-based text file rather than JSON, so it needs no serialization
+dependency and stays readable on its own; an unrecognized line is skipped
+rather than treated as an error, so a field added by a future version does no
+harm to an older one.
 
 **`app`** defines the `App` struct, which is the single source of truth for
 everything the program currently knows: which directory the sidebar is
-showing, which file is open, which page is on screen, and which pane has
-keyboard focus. It also defines the two methods that are allowed to change
-several of those fields together, `load_file` and `enter_dir`, so that
-related state, such as a newly loaded document and the page number
-resetting to zero, always changes as a unit. `app` depends on `browser` and
-`markdown`, since those are the modules that actually produce the data an
-`App` holds.
+showing, which file is open, its headings, which page is on screen, and
+which pane has keyboard focus. It also defines the methods that are allowed
+to change several of those fields together, such as `load_file` and
+`enter_dir`, so that related state always changes as a unit. `load_file`, for
+instance, records the previous file's page before switching, then opens the
+new file at whatever page was remembered for it, so moving between documents
+resumes each one rather than restarting it. `app` depends on `browser`,
+`markdown`, and `session`, since those are the modules that produce the data
+an `App` holds.
 
 **`events`** turns keyboard input into calls against an `App`. It reads
 one crossterm event at a time and decides what should happen: move the
@@ -110,13 +130,13 @@ handle one event, repeat, until `App::quit` becomes true. It contains no
 markdown logic, no drawing logic, and no key handling logic of its own.
 Everything it does is delegate to the modules above.
 
-A dependency runs in one direction only. `theme` depends on nothing.
-`browser` and `markdown` depend only on `theme`. `wrap` depends on
-`markdown`. `app` depends on `browser` and `markdown`. `events` and `ui`
-both depend on `app`, plus whatever lower-level module they need directly.
-`main` depends on everything. Nothing lower in this list ever depends on
-something higher, which is what makes each module possible to read in
-isolation.
+A dependency runs in one direction only. `theme` and `session` depend on
+nothing. `browser` and `markdown` depend only on `theme`. `wrap` depends on
+`markdown`. `app` depends on `browser`, `markdown`, and `session`. `events`
+and `ui` both depend on `app`, plus whatever lower-level module they need
+directly. `main` depends on everything. Nothing lower in this list ever
+depends on something higher, which is what makes each module possible to read
+in isolation.
 
 ## The App struct as the single source of truth
 
@@ -129,17 +149,27 @@ reader showing a few dozen visible rows, that cost does not matter.
 
 Because rendering is stateless, all the state that matters lives in one
 place. If a value affects what gets drawn, it belongs on `App`. A
-consequence of this is that a couple of fields exist purely to let two
-otherwise separate steps talk to each other across a frame boundary. The
-clearest example is `spread`: `ui::draw_document` is the only code that
-knows whether the terminal is currently wide enough for a two-page layout,
-but `events::handle_document_key` needs that same fact to decide whether a
-page turn should move by one page or by two. Rather than recomputing the
-width check in the event handler, `draw_document` writes the answer into
-`App` every frame, and the event handler reads it back on the next
-keypress. This is a deliberate exception to the general rule that state
-flows one direction, from input to app to render, and it is called out in
-the field's own comment so it does not look accidental later.
+consequence of this is that a few fields exist purely to let two otherwise
+separate steps talk to each other across a frame boundary. The clearest
+example is `spread`: `ui::draw_document` is the only code that knows whether
+the terminal is currently wide enough for a two-page layout, but
+`events::handle_document_key` needs that same fact to decide whether a page
+turn should move by one page or by two. Rather than recomputing the width
+check in the event handler, `draw_document` writes the answer into `App`
+every frame, and the event handler reads it back on the next keypress. This
+is a deliberate exception to the general rule that state flows one
+direction, from input to app to render, and it is called out in the field's
+own comment so it does not look accidental later.
+
+Two more fields work the same way, both in service of the table of contents.
+`pending_jump` carries a request in the other direction, from input toward
+render: choosing a heading sets it to that heading's block index, and the
+next draw resolves the block to a page and clears it, because only the draw
+step knows the viewport height that turns a row into a page. `active_heading`
+carries an answer back the same way `spread` does: each draw works out which
+heading the visible page falls under and records it, so the sidebar can
+highlight that entry. Both are called out in their own comments for the same
+reason `spread` is.
 
 ## Pages, not scroll rows
 
@@ -186,6 +216,75 @@ frame that would have drawn a spread draws a single page instead. That
 decision is remade every frame, based on the current width, so resizing a
 terminal window between narrow and wide switches modes immediately, with
 no toggle or setting involved.
+
+## The table of contents
+
+The sidebar shows two stacked lists: the file browser on top and, once a
+document with headings is open, its table of contents below. The contents
+list is a navigation aid and a "you are here" marker at once, and making it
+work threads a single fact, a heading's position, through three modules
+without any of them having to know the whole story.
+
+Parsing is where a heading becomes trackable. As `markdown::render_markdown`
+walks the event stream, each heading it closes is recorded as a `Heading`
+carrying its level, its text, and the index of the block that holds it. A
+block index is the right handle to keep, rather than a row or a page, because
+it survives reflow. The row a heading sits on changes every time the column
+width changes; which block it is does not.
+
+Turning that block index into a page is a job for layout, and only at draw
+time. `wrap::layout` already walks every block to produce the page, so it
+records, as it goes, the row each block starts on, and returns that alongside
+the text. To jump to a heading, `ui` looks up its block in that table, divides
+the row by the viewport height, and lands on the page. The same table, read
+the other way, answers the reverse question: which heading is the current page
+under. That is just the last heading whose row has already scrolled into or
+above the visible window, and because headings and their rows both run in
+document order, the search stops at the first heading that has not appeared
+yet.
+
+The event handler, in the middle, knows none of this. Choosing a heading only
+sets `pending_jump` to its block index and hands focus to the reader. It never
+computes a page, because at the moment a key is pressed the viewport height
+that a page depends on is not its to know. The draw step owns that knowledge,
+so the draw step does the conversion, on the next frame, and clears the
+request. This is the same division of labor that lets `G` ask for the last
+page without computing it: the key handler states an intention, and the one
+place that knows the true bounds resolves it.
+
+## Remembering the reading position
+
+booknook reopens a document on the page it was left on, and launched with no
+argument it reopens the last file entirely, the way a Kindle returns to the
+book you closed. All of that lives in the `session` module and a handful of
+fields on `App`, and the shape of it follows one decision: the position is
+remembered per file, not once globally, because a reader expects to return to
+the middle of a long essay it left yesterday even after dipping into three
+other files since.
+
+So `App` holds a map from a file's path to the page reached in it. The map is
+loaded from the saved session at startup and written back on quit, and only
+the open file's entry changes while running. Two moments update it: opening a
+different file, which records the outgoing file's page before switching, and
+quitting, which records the current file's page before saving. Between those,
+the live page number is enough; there is no need to touch the map on every
+page turn.
+
+The keys in that map are canonical paths, resolved through
+`fs::canonicalize`, so the same file reached by a relative path, an absolute
+one, or a symlink all land on one entry rather than three. A path that cannot
+be canonicalized, because the file has since moved, falls back to its own
+form, which is still a consistent key for the life of the process.
+
+The state file itself is deliberately plain text, one `key\tvalue` line at a
+time, not JSON. That keeps `session` free of any serialization dependency,
+keeps the file readable and hand-editable, and makes forward compatibility
+trivial: a line whose key the parser does not recognize is skipped, so an
+older build reading a file written by a newer one simply ignores the fields
+it does not understand rather than failing to load. Reading and writing are
+split into a pure parse-and-serialize pair with the file I/O wrapped around
+them, which is what lets the format be tested by round-tripping a `Session`
+through a string with no filesystem involved.
 
 ## Ownership and the borrow checker in practice
 

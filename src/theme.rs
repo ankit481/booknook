@@ -33,7 +33,7 @@ pub(crate) struct Theme {
 /// Cycled through with `t` while reading. A `static` rather than a `const`
 /// so that `&THEMES[i]` borrows for `'static` and callers never have to
 /// thread a lifetime through.
-pub(crate) static THEMES: [Theme; 5] = [
+pub(crate) static THEMES: [Theme; 6] = [
     // Cool and dark, in the Tokyo Night family. The blues are pulled well
     // back from where a syntax highlighter would put them.
     Theme {
@@ -96,5 +96,21 @@ pub(crate) static THEMES: [Theme; 5] = [
         muted: Color::Rgb(140, 132, 118),
         quote: Color::Rgb(92, 86, 76),
         link: Color::Rgb(86, 102, 120),
+    },
+    // Kindle's sepia: a warm cream page with soft brown ink, the classic
+    // e-reader setting for long sessions and for reading at night without the
+    // glare of a white background. The page is the exact tone Kindle uses,
+    // and every other value is pulled onto the same warm brown axis so
+    // nothing on the page reads as gray against it.
+    Theme {
+        name: "Sepia",
+        bg: Color::Rgb(228, 216, 191),
+        page: Color::Rgb(251, 240, 217),
+        fg: Color::Rgb(91, 70, 54),
+        heading: Color::Rgb(61, 47, 36),
+        code: Color::Rgb(122, 96, 68),
+        muted: Color::Rgb(176, 158, 128),
+        quote: Color::Rgb(120, 96, 72),
+        link: Color::Rgb(150, 98, 52),
     },
 ];

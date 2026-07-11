@@ -8,7 +8,7 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::markdown::RenderLine;
 
@@ -35,14 +35,35 @@ pub(crate) struct Spacing {
     pub(crate) paragraph: u16,
 }
 
+/// A laid-out document: the terminal rows to draw, and where each input
+/// block begins among them.
+///
+/// `block_rows` has one entry per input block, giving the row in `text` at
+/// which that block's content starts. It is what lets the reader jump to a
+/// heading: the sidebar knows a heading's block index, and this maps that
+/// index to a row, which divides by the viewport height to give a page.
+/// Because layout runs every frame at the current width, this mapping is
+/// always correct for the width on screen right now.
+pub(crate) struct Laid {
+    pub(crate) text: Text<'static>,
+    pub(crate) block_rows: Vec<u16>,
+}
+
 /// Lay out parsed blocks at a specific column width. Every prose block is
-/// word-wrapped and spaced according to `spacing`, while verbatim blocks
-/// such as code lines pass through unchanged.
-pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Text<'static> {
+/// word-wrapped and spaced according to `spacing`. Verbatim blocks, such as
+/// code and ASCII diagrams, keep their exact shape but are clipped to the
+/// column so a wide one is cut cleanly at the edge rather than soft-wrapped
+/// into a second row, which would break its alignment.
+pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Laid {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut block_rows: Vec<u16> = Vec::with_capacity(blocks.len());
     let mut prev_was_gap = false;
 
     for block in blocks {
+        // The row this block starts on is wherever output currently ends. A
+        // collapsed gap adds nothing and simply reports the current row, so
+        // the entry stays aligned with `blocks` one-for-one.
+        block_rows.push(out.len().min(u16::MAX as usize) as u16);
         match block {
             // Two blocks in a row can each ask for a gap, for instance a
             // paragraph ending just before its enclosing list does. Only
@@ -56,7 +77,7 @@ pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Tex
                 prev_was_gap = true;
                 continue;
             }
-            RenderLine::Verbatim(line) => out.push(line.clone()),
+            RenderLine::Verbatim(line) => out.push(clip_line(line, width as usize)),
             RenderLine::Prose { spans, indent, hang } => {
                 for (i, row) in wrap_prose(spans, *indent, *hang, width).into_iter().enumerate() {
                     if i > 0 {
@@ -70,7 +91,7 @@ pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Tex
         }
         prev_was_gap = false;
     }
-    Text::from(out)
+    Laid { text: Text::from(out), block_rows }
 }
 
 /// Break a block's spans into words, where a word is a run of non-whitespace
@@ -166,6 +187,45 @@ fn indent_line(mut spans: Vec<Span<'static>>, indent: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Cut a finished line down to `width` columns, keeping each kept piece's
+/// style. This is what stops a wide code line or ASCII diagram from being
+/// soft-wrapped into a second row and losing its alignment: it is clipped at
+/// the edge instead, with a `›` marking where content was dropped so a
+/// clipped line reads as clipped rather than as simply short. A line that
+/// already fits passes through untouched.
+fn clip_line(line: &Line<'static>, width: usize) -> Line<'static> {
+    let total: usize = line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+    if total <= width {
+        return line.clone();
+    }
+
+    // One column is held back for the cut marker, so the clipped line ends up
+    // exactly `width` wide, marker included.
+    let limit = width.saturating_sub(1);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in &line.spans {
+        if used >= limit {
+            break;
+        }
+        let mut kept = String::new();
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + ch_width > limit {
+                break;
+            }
+            kept.push(ch);
+            used += ch_width;
+        }
+        if !kept.is_empty() {
+            spans.push(Span::styled(kept, span.style));
+        }
+    }
+    let marker_style = line.spans.last().map(|s| s.style).unwrap_or_default();
+    spans.push(Span::styled("›".to_string(), marker_style));
+    Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +272,43 @@ mod tests {
         let spans = vec![Span::raw("• alpha beta gamma")];
         let rows: Vec<String> = wrap_prose(&spans, 0, 2, 10).iter().map(text_of).collect();
         assert_eq!(rows, vec!["• alpha", "  beta", "  gamma"]);
+    }
+
+    fn prose(text: &str) -> RenderLine {
+        RenderLine::Prose { spans: vec![Span::raw(text.to_string())], indent: 0, hang: 0 }
+    }
+
+    /// `block_rows` must report the row each block starts on, so a heading's
+    /// block index can be turned into a page. A collapsed gap contributes no
+    /// rows but still gets an entry, keeping the mapping one-to-one with the
+    /// input blocks.
+    #[test]
+    fn block_rows_track_where_each_block_begins() {
+        let blocks = vec![prose("a b"), RenderLine::Gap, prose("c")];
+        let laid = layout(&blocks, 40, Spacing { line: 0, paragraph: 1 });
+        // "a b" on row 0, one blank row for the paragraph gap, "c" on row 2.
+        assert_eq!(laid.block_rows, vec![0, 1, 2]);
+        assert_eq!(laid.text.lines.len(), 3);
+    }
+
+    /// A verbatim line wider than the column is clipped to a single row with a
+    /// cut marker, never wrapped into a second row, so ASCII art keeps its
+    /// shape. A line that fits is left exactly as it was.
+    #[test]
+    fn wide_verbatim_lines_are_clipped_not_wrapped() {
+        let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("0123456789ABCDEF")))];
+        let laid = layout(&blocks, 8, Spacing { line: 0, paragraph: 1 });
+
+        assert_eq!(laid.text.lines.len(), 1, "a wide code line must stay one row");
+        let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "0123456›", "clipped to width with a cut marker");
+    }
+
+    #[test]
+    fn narrow_verbatim_lines_pass_through_unchanged() {
+        let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("fits")))];
+        let laid = layout(&blocks, 40, Spacing { line: 0, paragraph: 1 });
+        let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "fits");
     }
 }

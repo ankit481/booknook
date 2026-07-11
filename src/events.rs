@@ -30,9 +30,14 @@ pub(crate) fn handle_events(app: &mut App) -> Result<()> {
             return Ok(());
         }
         KeyCode::Tab => {
+            // Files, then the contents list, then the reader, then back. The
+            // contents step is skipped when the open document has no headings,
+            // or none is open, so Tab never lands on an empty pane.
             app.focus = match app.focus {
-                Focus::Sidebar => Focus::Document,
-                Focus::Document => Focus::Sidebar,
+                Focus::Files if !app.headings.is_empty() => Focus::Toc,
+                Focus::Files => Focus::Document,
+                Focus::Toc => Focus::Document,
+                Focus::Document => Focus::Files,
             };
             return Ok(());
         }
@@ -44,7 +49,11 @@ pub(crate) fn handle_events(app: &mut App) -> Result<()> {
     }
 
     match app.focus {
-        Focus::Sidebar => handle_sidebar_key(app, key.code),
+        Focus::Files => handle_files_key(app, key.code),
+        Focus::Toc => {
+            handle_toc_key(app, key.code);
+            Ok(())
+        }
         Focus::Document => {
             handle_document_key(app, key.code);
             Ok(())
@@ -56,7 +65,7 @@ pub(crate) fn handle_events(app: &mut App) -> Result<()> {
 /// markdown file. Right, `l`, and Enter mean "go deeper." Left, `h`, and
 /// Backspace mean "go back," which are the same directions the reader uses
 /// for page turns.
-fn handle_sidebar_key(app: &mut App, code: KeyCode) -> Result<()> {
+fn handle_files_key(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('j') | KeyCode::Down => {
             if !app.entries.is_empty() {
@@ -86,6 +95,26 @@ fn handle_sidebar_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
+/// Move through the contents list and jump to a heading. Right, `l`, Enter,
+/// and space all mean "take me there," matching the reader's own
+/// forward-motion keys. Left and `h` step back to the file list, the same
+/// direction that goes up a folder.
+fn handle_toc_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if !app.headings.is_empty() {
+                app.toc_selected = (app.toc_selected + 1).min(app.headings.len() - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.toc_selected = app.toc_selected.saturating_sub(1),
+        KeyCode::Char('g') => app.toc_selected = 0,
+        KeyCode::Char('G') => app.toc_selected = app.headings.len().saturating_sub(1),
+        KeyCode::Char('l' | ' ') | KeyCode::Right | KeyCode::Enter => app.jump_to_heading(app.toc_selected),
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => app.focus = Focus::Files,
+        _ => {}
+    }
+}
+
 fn handle_document_key(app: &mut App, code: KeyCode) {
     // In a two-page spread, a page turn flips the whole spread, both
     // pages, the way it would with a real book, rather than just the one
@@ -103,7 +132,7 @@ fn handle_document_key(app: &mut App, code: KeyCode) {
         // it from the viewport, so this asks for "as far as possible" and
         // lets the draw step clamp it to something real.
         KeyCode::Char('G') => app.page = u16::MAX,
-        KeyCode::Char('o') => app.focus = Focus::Sidebar,
+        KeyCode::Char('o') => app.focus = Focus::Files,
 
         // Typography, adjustable while reading. Changing any of these
         // reflows the document on the next frame, which can move the text
