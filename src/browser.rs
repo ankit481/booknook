@@ -2,7 +2,7 @@
 //!
 //! This module has no idea that an App or a terminal exists. It only knows
 //! how to turn a directory path into a sorted list of entries, and how to
-//! tell a markdown file from anything else.
+//! tell a file booknook can read from anything else.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,4 +40,14 @@ pub(crate) fn list_dir(dir: &Path) -> Vec<Entry> {
 
 pub(crate) fn is_markdown(path: &Path) -> bool {
     matches!(path.extension().and_then(|ext| ext.to_str()), Some("md") | Some("markdown"))
+}
+
+/// Whether the sidebar should offer to open this file at all: markdown or an
+/// EPUB. The sidebar colors these as readable and Enter opens them; anything
+/// else is shown muted and ignored. The extension check is spelled out here
+/// rather than borrowed from the `epub` module so this module stays a leaf,
+/// depending on nothing above it.
+pub(crate) fn is_readable(path: &Path) -> bool {
+    is_markdown(path)
+        || matches!(path.extension().and_then(|ext| ext.to_str()), Some(ext) if ext.eq_ignore_ascii_case("epub"))
 }

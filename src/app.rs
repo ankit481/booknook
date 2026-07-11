@@ -12,10 +12,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::browser::{self, Entry};
+use crate::epub;
 use crate::markdown::{self, Heading, RenderLine};
 use crate::session::Session;
 use crate::theme::{Theme, THEMES};
 use crate::wrap::Spacing;
+
+/// What the open document was rendered from, kept so that a theme switch
+/// can render it again with the new palette. Markdown keeps its raw text in
+/// memory, since it already arrived as one string. An EPUB keeps only its
+/// path and is re-read from disk instead: the parsed book is the large thing,
+/// and holding a second full copy of every chapter's XHTML purely for theme
+/// switches would double the cost of having the book open.
+pub(crate) enum Source {
+    None,
+    Markdown(String),
+    Epub(PathBuf),
+}
 
 /// Which pane currently receives keyboard input. All panes are always drawn;
 /// this only decides where `j`, `k`, the arrow keys, and Enter go. `Files`
@@ -50,10 +63,10 @@ pub(crate) struct App {
     /// is only for display: this is the canonical key under which the reading
     /// position is remembered, and the file to reopen on the next launch.
     pub(crate) current: Option<PathBuf>,
-    /// The open document's raw markdown, kept so that switching themes can
-    /// reparse it. Colors are baked into `blocks` at parse time, so a new
-    /// theme means a new parse.
-    raw: String,
+    /// Where the open document's text comes from, kept so that switching
+    /// themes can re-render it. Colors are baked into `blocks` at parse
+    /// time, so a new theme means going back to the source.
+    source: Source,
     /// The parsed document, not yet wrapped to any particular width.
     /// Layout happens every frame, against the current column width, in
     /// the `ui` module. This stays empty until a file has been opened.
@@ -114,7 +127,7 @@ impl App {
             selected: 0,
             title: String::new(),
             current: None,
-            raw: String::new(),
+            source: Source::None,
             blocks: Vec::new(),
             headings: Vec::new(),
             toc_selected: 0,
@@ -144,32 +157,58 @@ impl App {
         &THEMES[self.theme_index]
     }
 
-    /// Move to the next palette and reparse the open document with it.
+    /// Move to the next palette and re-render the open document with it.
+    /// Markdown re-parses from the raw text held in memory; an EPUB is read
+    /// again from disk. Either way the page number is untouched, so the
+    /// reader stays where it was, just in new colors.
     pub(crate) fn cycle_theme(&mut self) {
         self.theme_index = (self.theme_index + 1) % THEMES.len();
-        if !self.raw.is_empty() {
-            let parsed = markdown::render_markdown(&self.raw, self.theme());
-            self.blocks = parsed.blocks;
-            self.headings = parsed.headings;
-        }
+        let parsed = match &self.source {
+            Source::None => return,
+            Source::Markdown(raw) => markdown::render_markdown(raw, self.theme()),
+            // A book that re-read fine a moment ago but fails now, perhaps
+            // deleted mid-session, keeps its old colors rather than going
+            // blank. The stale palette is the gentler failure.
+            Source::Epub(path) => match epub::load(path, self.theme()) {
+                Ok(book) => book.parsed,
+                Err(_) => return,
+            },
+        };
+        self.blocks = parsed.blocks;
+        self.headings = parsed.headings;
     }
 
     /// Read `path`, parse it, and switch keyboard focus to the reader. The
     /// page it opens on is whatever was last reached in this file, so
-    /// reopening a document resumes it rather than restarting it.
+    /// reopening a document resumes it rather than restarting it. Markdown
+    /// and EPUB part ways only here, at the parsing step; everything after
+    /// the parse treats them identically.
     pub(crate) fn load_file(&mut self, path: &Path) -> Result<()> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("could not read {}", path.display()))?;
         // Record where the previously open file was left before moving on, so
         // a session that touches several files remembers each of them.
         self.remember_position();
 
-        let parsed = markdown::render_markdown(&raw, self.theme());
-        self.title = path.display().to_string();
+        if epub::is_epub(path) {
+            let book = epub::load(path, self.theme())?;
+            // The book's own title, when its metadata carries one, beats the
+            // filename: an EPUB filename is often a whole catalog entry.
+            self.title = book
+                .title
+                .unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            self.blocks = book.parsed.blocks;
+            self.headings = book.parsed.headings;
+            self.source = Source::Epub(path.to_path_buf());
+        } else {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("could not read {}", path.display()))?;
+            let parsed = markdown::render_markdown(&raw, self.theme());
+            self.title = path.display().to_string();
+            self.blocks = parsed.blocks;
+            self.headings = parsed.headings;
+            self.source = Source::Markdown(raw);
+        }
+
         self.current = Some(canonical(path));
-        self.blocks = parsed.blocks;
-        self.headings = parsed.headings;
-        self.raw = raw;
         self.toc_selected = 0;
         self.active_heading = None;
         self.pending_jump = None;
@@ -201,7 +240,7 @@ impl App {
         self.current = None;
         self.blocks = parsed.blocks;
         self.headings = parsed.headings;
-        self.raw = raw;
+        self.source = Source::Markdown(raw);
         self.toc_selected = 0;
         self.active_heading = None;
         self.pending_jump = None;

@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Focus};
-use crate::browser::is_markdown;
+use crate::browser::is_readable;
 use crate::theme::Theme;
 use crate::wrap;
 
@@ -270,7 +270,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         let name = if entry.is_dir { format!("{}/", entry.name) } else { entry.name.clone() };
         let color = if entry.is_dir {
             theme.link
-        } else if is_markdown(&entry.path) {
+        } else if is_readable(&entry.path) {
             theme.fg
         } else {
             theme.muted

@@ -78,6 +78,19 @@ reparses the open document. That is cheaper than carrying a semantic role on
 every span and resolving it against the palette on every frame, and
 documents are small enough that the reparse is not noticeable.
 
+**`epub`** is the other way a document gets parsed. It opens an EPUB
+container with the `epub` crate, walks every chapter in the book's reading
+order, and converts each chapter's XHTML into the same `RenderLine` blocks
+the markdown parser produces, using quick-xml for the markup. It ends at
+exactly the same type `markdown` does, a `Parsed`, which is the point:
+nothing downstream of parsing knows whether it is showing a note or a novel.
+Chapter headings found in the content feed the table of contents, and when a
+book carries no usable headings, the book's own navigation file is resolved
+against each chapter's starting block and used instead. Inline styling is
+honored both as semantic tags, `<em>` and `<strong>`, and as the classed
+spans Calibre conversions emit, `<span class="italic">`, because a book that
+loses its italics has quietly lost part of its text.
+
 **`wrap`** is the layout stage described above. It depends on `markdown`,
 for the `RenderLine` type it consumes, and on the `unicode-width` crate, to
 measure how many terminal columns each word actually occupies. Its only
@@ -131,12 +144,13 @@ markdown logic, no drawing logic, and no key handling logic of its own.
 Everything it does is delegate to the modules above.
 
 A dependency runs in one direction only. `theme` and `session` depend on
-nothing. `browser` and `markdown` depend only on `theme`. `wrap` depends on
-`markdown`. `app` depends on `browser`, `markdown`, and `session`. `events`
-and `ui` both depend on `app`, plus whatever lower-level module they need
-directly. `main` depends on everything. Nothing lower in this list ever
-depends on something higher, which is what makes each module possible to read
-in isolation.
+nothing. `browser`, `markdown`, and `epub` depend only on `theme`, plus, for
+`epub`, the `markdown` module's block types, since both parsers meet at the
+same output. `wrap` depends on `markdown`. `app` depends on `browser`,
+`markdown`, `epub`, and `session`. `events` and `ui` both depend on `app`,
+plus whatever lower-level module they need directly. `main` depends on
+everything. Nothing lower in this list ever depends on something higher,
+which is what makes each module possible to read in isolation.
 
 ## The App struct as the single source of truth
 

@@ -4,6 +4,7 @@
 
 mod app;
 mod browser;
+mod epub;
 mod events;
 mod gist;
 mod markdown;

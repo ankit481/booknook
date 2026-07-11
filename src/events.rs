@@ -8,7 +8,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use crate::app::{App, Focus, MAX_PAGE_WIDTH, MAX_SPACING, MIN_PAGE_WIDTH};
-use crate::browser::is_markdown;
+use crate::browser::is_readable;
 
 pub(crate) fn handle_events(app: &mut App) -> Result<()> {
     // read() blocks until the next terminal event arrives, whether that is
@@ -84,7 +84,7 @@ fn handle_files_key(app: &mut App, code: KeyCode) -> Result<()> {
                 if entry.is_dir {
                     let target = entry.path.clone();
                     app.enter_dir(target);
-                } else if is_markdown(&entry.path) {
+                } else if is_readable(&entry.path) {
                     let target = entry.path.clone();
                     app.load_file(&target)?;
                 }

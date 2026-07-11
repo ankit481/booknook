@@ -1,11 +1,12 @@
 # booknook
 
-**A calm, book-like markdown reader for the terminal.**
+**A calm, book-like reader for the terminal. Markdown and EPUB.**
 
-Your notes deserve better than a scrollback buffer. booknook opens a markdown
-file as a two-page spread, with a spine down the middle, generous margins,
-and a palette chosen so the words come forward and everything else recedes.
-It turns pages. It does not scroll.
+Your notes deserve better than a scrollback buffer, and your books deserve
+better than a browser tab. booknook opens a markdown file or an EPUB as a
+two-page spread, with a spine down the middle, generous margins, and a
+palette chosen so the words come forward and everything else recedes. It
+turns pages. It does not scroll.
 
 ```sh
 cargo run
@@ -53,6 +54,11 @@ was left out on purpose.
 - Full markdown rendering: headings, bold and italic, inline code, fenced
   code blocks with language labels, blockquotes, ordered and nested
   unordered lists, and links
+- EPUB reading: a whole book opens as one continuous document, in reading
+  order, with the book's real title in place of its filename. Chapter
+  headings feed the contents pane; when a book carries no usable headings,
+  its own navigation file is used instead. Italics and bold survive even in
+  Calibre conversions that encode them as styled spans
 - An always-visible file browser sidebar, so you can move between documents
   without leaving the reader
 - A table of contents below the browser, drawn from the open document's
@@ -92,6 +98,7 @@ a file directly, or to start browsing somewhere specific.
 booknook                    # reopen where you left off
 booknook path/to/notes      # browse a folder
 booknook path/to/file.md    # open a document
+booknook path/to/book.epub  # open a book
 ```
 
 ### Keys
