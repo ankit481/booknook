@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod browser;
+mod confluence;
 mod epub;
 mod events;
 mod gist;
@@ -65,12 +66,18 @@ fn open_initial(app: &mut App, session: &Session) -> Result<()> {
     // somewhere to point, both panes are always drawn, so it lists the
     // current directory while the reader shows the fetched document.
     //
-    // A pull-request link is checked before a plain remote link, because a PR
-    // URL is also an https URL: it needs the authenticated `gh` path, not the
-    // anonymous fetch a gist uses.
+    // Pull-request and Confluence links are checked before a plain remote
+    // link, because both are also https URLs: each needs its authenticated
+    // path, not the anonymous fetch a gist uses.
     if let Some(arg) = std::env::args().nth(1) {
         if pr::looks_like_pr(&arg) {
             let (title, raw) = pr::fetch(&arg)?;
+            app.enter_dir(std::env::current_dir()?);
+            app.load_content(raw, title);
+            return Ok(());
+        }
+        if confluence::looks_like_confluence(&arg) {
+            let (title, raw) = confluence::fetch(&arg)?;
             app.enter_dir(std::env::current_dir()?);
             app.load_content(raw, title);
             return Ok(());
