@@ -48,7 +48,22 @@ const GUTTER: u16 = 5;
 
 /// How wide the left sidebar is. Wide enough for the file browser and for the
 /// contents list to show most headings on a single line before wrapping.
-const SIDEBAR_WIDTH: u16 = 34;
+pub(crate) const SIDEBAR_WIDTH: u16 = 34;
+
+/// The rect the document is drawn into, to the right of the sidebar and above
+/// the status bar. This is the same region `draw` lays the reader out in, and
+/// the page-turn animation clips its slide to it so only the reading column
+/// moves. Kept as a plain function so the layout math has one home: the
+/// vertical split reserves the bottom row for the status bar, and the
+/// horizontal one reserves the left columns for the sidebar.
+pub(crate) fn document_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x + SIDEBAR_WIDTH.min(area.width),
+        y: area.y,
+        width: area.width.saturating_sub(SIDEBAR_WIDTH),
+        height: area.height.saturating_sub(1),
+    }
+}
 
 fn draw_document(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let theme = app.theme();
@@ -423,8 +438,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
             } else {
                 format!("page {}", app.page + 1)
             };
+            let flip = if app.animate { " · flip on" } else { "" };
             format!(
-                "  {position} / {page_count}   line {} · para {} · width {} · {}   [ ] {{ }} -/+ t · Tab · q",
+                "  {position} / {page_count}   line {} · para {} · width {} · {}{flip}   [ ] {{ }} -/+ t · a · Tab · q",
                 app.spacing.line, app.spacing.paragraph, app.page_width, theme.name
             )
         }
@@ -537,6 +553,24 @@ mod tests {
         assert!(app.page >= 1, "the jump should leave the first page, landed on {}", app.page);
         assert_eq!(app.pending_jump, None, "the jump request should be consumed");
         assert_eq!(app.active_heading, Some(1), "the second heading should now be the active one");
+    }
+
+    /// The standalone `document_area` used by the page-turn animation must
+    /// carve out the exact rect the real draw path hands the reader, so the
+    /// slide lines up with the column it is sliding. This pins the two together
+    /// at a representative terminal size.
+    #[test]
+    fn document_area_matches_the_drawn_layout() {
+        let area = Rect::new(0, 0, 100, 30);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(rows[0]);
+        assert_eq!(document_area(area), cols[1]);
     }
 
     #[test]

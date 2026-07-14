@@ -6,10 +6,11 @@
 //! such as `dir` and `entries`, or `blocks` and `page`, go through a
 //! method here, so that consistency lives in one place.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use crossterm::event::KeyEvent;
 
 use crate::browser::{self, Entry};
 use crate::epub;
@@ -110,6 +111,19 @@ pub(crate) struct App {
     /// An index into `THEMES` rather than a `Theme` value, so that `App`
     /// borrows the palette instead of owning a copy of it.
     theme_index: usize,
+    /// Whether a page turn slides the old page out and the new one in, rather
+    /// than swapping instantly. Off by default: the plain swap is the calmer
+    /// default, and this is here for readers who want the tactile turn. Toggled
+    /// with `a` and remembered across runs.
+    pub(crate) animate: bool,
+    /// Set by the event handler when a key turned the page, read and cleared by
+    /// the main loop to decide whether to run the turn animation. Jumps and
+    /// typography changes leave it alone, so only true page turns animate.
+    pub(crate) page_turn: bool,
+    /// Keys the animation's coalescing read off the queue but did not consume,
+    /// handled before the next blocking read so none is lost. Empty except in
+    /// the moment right after a coalesced burst of turns.
+    pub(crate) pending_keys: VecDeque<KeyEvent>,
     pub(crate) quit: bool,
 }
 
@@ -146,6 +160,9 @@ impl App {
             spacing: Spacing { line: 0, paragraph: 1 },
             positions: HashMap::new(),
             theme_index: 0,
+            animate: false,
+            page_turn: false,
+            pending_keys: VecDeque::new(),
             quit: false,
         }
     }
@@ -284,6 +301,7 @@ impl App {
             paragraph: session.para.min(MAX_SPACING),
         };
         self.theme_index = session.theme_index % THEMES.len();
+        self.animate = session.animate;
         self.positions = session.positions.clone();
     }
 
@@ -297,6 +315,7 @@ impl App {
             line: self.spacing.line,
             para: self.spacing.paragraph,
             theme_index: self.theme_index,
+            animate: self.animate,
             positions: self.positions.clone(),
         }
     }

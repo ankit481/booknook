@@ -2,6 +2,7 @@
 //!
 //! See `docs/architecture.md` for how the pieces below fit together.
 
+mod anim;
 mod app;
 mod browser;
 mod epub;
@@ -17,9 +18,10 @@ mod wrap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 
-use app::App;
+use app::{App, Focus};
 use events::handle_events;
 use session::Session;
 use ui::draw;
@@ -106,8 +108,36 @@ fn open_initial(app: &mut App, session: &Session) -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.quit {
-        terminal.draw(|frame| draw(frame, app))?;
+        app.page_turn = false;
+
+        // When a slide might follow, the frame is captured as it is drawn so
+        // it can serve as the "before" image the new page slides in over.
+        // Capturing costs a buffer clone, so it is skipped unless animation is
+        // on and the reader has focus, the only case a turn can animate.
+        let capturing = app.animate && matches!(app.focus, Focus::Document);
+        let mut before = None;
+        let mut area = Rect::default();
+        terminal.draw(|frame| {
+            draw(frame, app);
+            if capturing {
+                area = frame.area();
+                before = Some(frame.buffer_mut().clone());
+            }
+        })?;
+
+        let from_page = app.page;
         handle_events(app)?;
+
+        // A turn key was pressed with animation on and a frame to slide from.
+        // Fold in any keys already queued behind it, then slide from the old
+        // page to wherever those turns landed.
+        if app.page_turn {
+            if let Some(before) = before {
+                events::coalesce_turns(app)?;
+                let dir = if app.page >= from_page { anim::Direction::Forward } else { anim::Direction::Back };
+                anim::turn(terminal, app, before, area, dir)?;
+            }
+        }
     }
     Ok(())
 }

@@ -34,6 +34,8 @@ pub(crate) struct Session {
     /// Blank rows between paragraphs, matching `Spacing::paragraph`.
     pub(crate) para: u16,
     pub(crate) theme_index: usize,
+    /// Whether page turns are animated. Stored as `0` or `1` in the file.
+    pub(crate) animate: bool,
     /// The page reached in each document, keyed by its path. This is what
     /// makes returning to any file land on the page it was left on.
     pub(crate) positions: HashMap<PathBuf, u16>,
@@ -52,6 +54,7 @@ impl Default for Session {
             line: 0,
             para: 1,
             theme_index: 0,
+            animate: false,
             positions: HashMap::new(),
         }
     }
@@ -104,6 +107,7 @@ impl Session {
                         session.theme_index = n;
                     }
                 }
+                (Some("anim"), Some(value), _) => session.animate = value == "1",
                 (Some("pos"), Some(page), Some(file)) => {
                     if let Ok(n) = page.parse() {
                         session.positions.insert(PathBuf::from(file), n);
@@ -141,6 +145,7 @@ impl Session {
         out.push_str(&format!("line\t{}\n", self.line));
         out.push_str(&format!("para\t{}\n", self.para));
         out.push_str(&format!("theme\t{}\n", self.theme_index));
+        out.push_str(&format!("anim\t{}\n", if self.animate { 1 } else { 0 }));
         for (file, page) in &self.positions {
             out.push_str(&format!("pos\t{}\t{}\n", page, file.display()));
         }
@@ -174,6 +179,7 @@ mod tests {
             line: 0,
             para: 1,
             theme_index: 2,
+            animate: true,
             positions,
         };
 
@@ -182,6 +188,7 @@ mod tests {
         assert_eq!(restored.last_file, session.last_file);
         assert_eq!(restored.page_width, 64);
         assert_eq!(restored.theme_index, 2);
+        assert!(restored.animate, "the animation toggle should round-trip");
         assert_eq!(restored.positions.get(&PathBuf::from("/notes/a book.md")), Some(&12));
         assert_eq!(restored.positions.get(&PathBuf::from("/notes/other.md")), Some(&3));
     }
