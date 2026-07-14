@@ -265,6 +265,17 @@ impl App {
         self.focus = Focus::Document;
     }
 
+    /// Whether the sidebar should be on screen. It shows whenever it could
+    /// be needed: while it owns the keyboard, and while there is nothing to
+    /// read. The moment focus moves to the reader it recedes entirely, so
+    /// the page stands alone the way it would on an e-reader, and Tab or
+    /// `o` brings it back. Because the reading column keeps its fixed width
+    /// either way, receding recenters the sheet without reflowing a single
+    /// line, so page numbers do not change.
+    pub(crate) fn sidebar_visible(&self) -> bool {
+        !matches!(self.focus, Focus::Document) || self.blocks.is_empty()
+    }
+
     /// Point the sidebar at `dir` and list its contents.
     pub(crate) fn enter_dir(&mut self, dir: PathBuf) {
         self.entries = browser::list_dir(&dir);
