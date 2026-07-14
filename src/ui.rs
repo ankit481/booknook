@@ -28,9 +28,14 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
     let (body, status_bar) = (rows[0], rows[1]);
 
+    // The sidebar recedes while the reader has focus, giving the page the
+    // whole window, and returns when Tab or `o` hands the keyboard back to
+    // it. Zero-width is how it recedes: the same layout runs either way, so
+    // there is exactly one split to keep consistent with `document_area`.
+    let sidebar_width = if app.sidebar_visible() { SIDEBAR_WIDTH } else { 0 };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
         .split(body);
     let (sidebar_area, doc_area) = (cols[0], cols[1]);
 
@@ -39,7 +44,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     // list wants that answer to highlight the right entry. Drawing the reader
     // first means the sidebar sees this frame's value, not last frame's.
     let page_count = draw_document(frame, app, doc_area);
-    draw_sidebar(frame, app, sidebar_area);
+    if sidebar_width > 0 {
+        draw_sidebar(frame, app, sidebar_area);
+    }
     draw_status_bar(frame, app, status_bar, page_count);
 }
 
@@ -55,12 +62,15 @@ pub(crate) const SIDEBAR_WIDTH: u16 = 34;
 /// the page-turn animation clips its slide to it so only the reading column
 /// moves. Kept as a plain function so the layout math has one home: the
 /// vertical split reserves the bottom row for the status bar, and the
-/// horizontal one reserves the left columns for the sidebar.
-pub(crate) fn document_area(area: Rect) -> Rect {
+/// horizontal one reserves the left columns for the sidebar, when it is
+/// showing. `sidebar` must be the same `App::sidebar_visible` answer the
+/// frame was drawn with, or the two layouts drift apart.
+pub(crate) fn document_area(area: Rect, sidebar: bool) -> Rect {
+    let sidebar_width = if sidebar { SIDEBAR_WIDTH } else { 0 };
     Rect {
-        x: area.x + SIDEBAR_WIDTH.min(area.width),
+        x: area.x + sidebar_width.min(area.width),
         y: area.y,
-        width: area.width.saturating_sub(SIDEBAR_WIDTH),
+        width: area.width.saturating_sub(sidebar_width),
         height: area.height.saturating_sub(1),
     }
 }
@@ -440,7 +450,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
             };
             let flip = if app.animate { " · flip on" } else { "" };
             format!(
-                "  {position} / {page_count}   line {} · para {} · width {} · {}{flip}   [ ] {{ }} -/+ t · a · Tab · q",
+                "  {position} / {page_count}   line {} · para {} · width {} · {}{flip}   [ ] {{ }} -/+ t · a · Tab sidebar · q",
                 app.spacing.line, app.spacing.paragraph, app.page_width, theme.name
             )
         }
@@ -558,7 +568,8 @@ mod tests {
     /// The standalone `document_area` used by the page-turn animation must
     /// carve out the exact rect the real draw path hands the reader, so the
     /// slide lines up with the column it is sliding. This pins the two together
-    /// at a representative terminal size.
+    /// at a representative terminal size, both with the sidebar showing and
+    /// with it receded.
     #[test]
     fn document_area_matches_the_drawn_layout() {
         let area = Rect::new(0, 0, 100, 30);
@@ -566,11 +577,49 @@ mod tests {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
             .split(area);
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
-            .split(rows[0]);
-        assert_eq!(document_area(area), cols[1]);
+        for sidebar in [true, false] {
+            let width = if sidebar { SIDEBAR_WIDTH } else { 0 };
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(width), Constraint::Min(1)])
+                .split(rows[0]);
+            assert_eq!(document_area(area, sidebar), cols[1]);
+        }
+    }
+
+    /// While the reader has focus the sidebar recedes entirely: no file
+    /// list, no contents box, just the page. Handing focus back to the
+    /// sidebar brings it back. The page itself must stay put through both
+    /// frames, since the reading column's width never changed.
+    #[test]
+    fn the_sidebar_recedes_while_reading_and_returns_on_focus() {
+        let mut app = App::new();
+        let doc = "# Chapter One\n\nSome body text here.\n";
+        let parsed = markdown::render_markdown(doc, app.theme());
+        app.blocks = parsed.blocks;
+        app.headings = parsed.headings;
+        app.focus = Focus::Document;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let reading = screen(&terminal);
+        assert!(!reading.contains("Contents"), "the contents box should recede while reading:\n{reading}");
+        assert!(reading.contains("Some body text"), "the page itself must remain:\n{reading}");
+
+        app.focus = Focus::Files;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let browsing = screen(&terminal);
+        assert!(browsing.contains("Contents"), "the sidebar should return with focus:\n{browsing}");
+    }
+
+    /// With nothing open there is nothing to read, so the sidebar holds its
+    /// ground even if focus lands on the empty reader; receding would leave
+    /// a blank screen with no way to see where you are.
+    #[test]
+    fn an_empty_reader_keeps_the_sidebar() {
+        let mut app = App::new();
+        app.focus = Focus::Document;
+        assert!(app.sidebar_visible(), "no document means the sidebar stays");
     }
 
     #[test]

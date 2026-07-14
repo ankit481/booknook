@@ -59,8 +59,9 @@ was left out on purpose.
   headings feed the contents pane; when a book carries no usable headings,
   its own navigation file is used instead. Italics and bold survive even in
   Calibre conversions that encode them as styled spans
-- An always-visible file browser sidebar, so you can move between documents
-  without leaving the reader
+- A file browser sidebar that recedes while you read: the moment focus
+  moves to the reader, the sidebar disappears and the page stands alone on
+  the sheet, the way it would on an e-reader. Tab or `o` brings it back
 - A table of contents below the browser, drawn from the open document's
   headings, that jumps straight to any of them and marks where you are
 - Remembers your place. Every document reopens on the page you left it on,
