@@ -68,6 +68,11 @@ was left out on purpose.
   the way a Kindle returns to the book you were reading, and launching with
   no argument reopens the last file you had open
 - Automatic two-page spread on wide terminals, single page on narrow ones
+- Book-quality page breaks: a page never ends on a heading, never strands
+  a paragraph's first line at its bottom or sends the last line alone onto
+  the next page, and never cuts a table row through a wrapped cell. When
+  the arithmetic break would land badly, the page ends a line or two early
+  instead, the way a typesetter leaves a short page rather than a bad break
 - Live typography controls: column width, line spacing, and paragraph
   spacing, all adjustable while reading
 - Six color themes, cycled with a single key, including Kindle-style sepia
