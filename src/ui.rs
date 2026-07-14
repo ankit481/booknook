@@ -116,22 +116,17 @@ fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
 
     // The document is wrapped by the `wrap` module rather than left to
     // Paragraph's own wrapping, so that a blank row can be inserted
-    // between wrapped lines for real line spacing. Because this runs
-    // every frame against the current width, resizing the terminal
-    // reflows the text correctly for free.
-    let laid = wrap::layout(&app.blocks, reading_area.width, app.spacing);
+    // between wrapped lines for real line spacing, and then paginated so
+    // every page boundary falls at a break a typesetter would allow.
+    // Because this runs every frame against the current width and height,
+    // resizing the terminal reflows and re-breaks the pages for free.
+    let viewport = reading_area.height.max(1);
+    let laid = wrap::paginate(wrap::layout(&app.blocks, &app.headings, reading_area.width, app.spacing), viewport);
+    let total_rows = laid.text.lines.len() as u16;
+    let page_count = total_rows.div_ceil(viewport).max(1);
     let paragraph = Paragraph::new(laid.text)
         .style(Style::default().fg(theme.fg).bg(theme.page))
         .wrap(Wrap { trim: false });
-
-    // line_count() reports how many rows the text needs at this width. Our
-    // own wrapping already fits `reading_area.width`, so this is normally
-    // just the number of lines already produced, but it also catches the
-    // rare case of a single word too long to fit, such as a long URL,
-    // which Paragraph's own wrap still has to hard-break as a safety net.
-    let viewport = reading_area.height.max(1);
-    let total_rows = paragraph.line_count(reading_area.width) as u16;
-    let page_count = total_rows.div_ceil(viewport).max(1);
 
     apply_pending_jump(app, &laid.block_rows, viewport);
     app.page = app.page.min(page_count - 1);
@@ -173,9 +168,9 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let spine_area = cols[1];
     let right_area = inset_horizontal(inset_vertical(cols[2], 3, 2), 2, 2);
 
-    let laid = wrap::layout(&app.blocks, left_area.width, app.spacing);
-    let text = laid.text;
     let viewport = left_area.height.max(1);
+    let laid = wrap::paginate(wrap::layout(&app.blocks, &app.headings, left_area.width, app.spacing), viewport);
+    let text = laid.text;
     let total_rows = text.lines.len() as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
 

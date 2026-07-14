@@ -1,16 +1,25 @@
-//! Word-wrapping parsed blocks to a specific column width.
+//! Word-wrapping parsed blocks to a specific column width, and breaking
+//! the result into pages a typesetter would sign off on.
 //!
 //! ratatui's own `Paragraph` widget can wrap text, but it gives no way to
 //! see the individual wrapped rows it produces, which means there is no
 //! way to insert a blank row between them for line spacing. This module
 //! does the wrapping itself instead, so the reader can space every line
 //! the way an e-reader's line-spacing setting would.
+//!
+//! Owning the rows also makes real page breaks possible. `layout` tags
+//! each row with whether a page may end after it, and `paginate` walks
+//! those rows page by page, ending a page a line or two early whenever
+//! the arithmetic break would strand something: a heading at a page
+//! bottom, a paragraph's first line left behind, its last line alone
+//! overleaf. A short page is how books solve this too; the blank rows
+//! that pad it out are invisible, while a bad break is not.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::markdown::{RenderLine, TableBlock};
+use crate::markdown::{Heading, RenderLine, TableBlock};
 
 /// One word, as a run of styled pieces.
 ///
@@ -47,6 +56,56 @@ pub(crate) struct Spacing {
 pub(crate) struct Laid {
     pub(crate) text: Text<'static>,
     pub(crate) block_rows: Vec<u16>,
+    /// One entry per row of `text`: the break hints `paginate` reads.
+    /// Empty once a `Laid` has been through pagination, since its rows are
+    /// then final and carry nothing left to decide.
+    pub(crate) meta: Vec<RowMeta>,
+}
+
+/// How one terminal row may relate to a page edge, decided while the row is
+/// produced, when the block it belongs to is still at hand.
+///
+/// `keep_with_next` means a page must not end after this row: the first
+/// line of a paragraph, any line of a heading, the rule under a table
+/// header. `blank` marks structural air, gaps and line spacing, which a new
+/// page sheds from its top; a book never opens a page with blank leading.
+#[derive(Clone, Copy)]
+pub(crate) struct RowMeta {
+    pub(crate) keep_with_next: bool,
+    pub(crate) blank: bool,
+}
+
+/// The rows of a document as they are produced, each paired with its break
+/// hints. Blank rows inherit the keep flag of the row above them: a break
+/// after trailing air reads, on the page, as a break after the content
+/// itself, so whatever that content forbids its air must forbid too. This
+/// inheritance is what carries a heading's keep-with-next across the gap
+/// under it and onto the next paragraph without any special casing.
+#[derive(Default)]
+struct Rows {
+    lines: Vec<Line<'static>>,
+    meta: Vec<RowMeta>,
+}
+
+impl Rows {
+    fn content(&mut self, line: Line<'static>, keep_with_next: bool) {
+        self.lines.push(line);
+        self.meta.push(RowMeta { keep_with_next, blank: false });
+    }
+
+    fn blank(&mut self) {
+        let keep_with_next = self.meta.last().is_some_and(|m| m.keep_with_next);
+        self.lines.push(Line::default());
+        self.meta.push(RowMeta { keep_with_next, blank: true });
+    }
+
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
 }
 
 /// Lay out parsed blocks at a specific column width. Every prose block is
@@ -54,12 +113,21 @@ pub(crate) struct Laid {
 /// code and ASCII diagrams, keep their exact shape but are clipped to the
 /// column so a wide one is cut cleanly at the edge rather than soft-wrapped
 /// into a second row, which would break its alignment.
-pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Laid {
-    let mut out: Vec<Line<'static>> = Vec::new();
+///
+/// `headings` tells the row-tagging which prose blocks are headings, since
+/// a heading must never be the last thing on a page. The result is not yet
+/// page-shaped: hand it to `paginate` with a viewport height to get rows
+/// whose page boundaries all fall at defensible breaks.
+pub(crate) fn layout(blocks: &[RenderLine], headings: &[Heading], width: u16, spacing: Spacing) -> Laid {
+    // Heading block indices arrive in document order, so membership is a
+    // binary search rather than a set build per frame.
+    let heading_blocks: Vec<usize> = headings.iter().map(|h| h.block).collect();
+
+    let mut out = Rows::default();
     let mut block_rows: Vec<u16> = Vec::with_capacity(blocks.len());
     let mut prev_was_gap = false;
 
-    for block in blocks {
+    for (index, block) in blocks.iter().enumerate() {
         // The row this block starts on is wherever output currently ends. A
         // collapsed gap adds nothing and simply reports the current row, so
         // the entry stays aligned with `blocks` one-for-one.
@@ -71,30 +139,120 @@ pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Lai
             RenderLine::Gap => {
                 if !prev_was_gap && !out.is_empty() {
                     for _ in 0..spacing.paragraph {
-                        out.push(Line::default());
+                        out.blank();
                     }
                 }
                 prev_was_gap = true;
                 continue;
             }
-            RenderLine::Verbatim(line) => out.push(clip_line(line, width as usize)),
-            RenderLine::Table(table) => {
-                out.extend(layout_table(table, width, spacing.line));
-            }
+            RenderLine::Verbatim(line) => out.content(clip_line(line, width as usize), false),
+            RenderLine::Table(table) => layout_table(&mut out, table, width, spacing.line),
             RenderLine::Prose { spans, indent, hang } => {
-                for (i, row) in wrap_prose(spans, *indent, *hang, width).into_iter().enumerate() {
+                let is_heading = heading_blocks.binary_search(&index).is_ok();
+                let wrapped = wrap_prose(spans, *indent, *hang, width);
+                let count = wrapped.len();
+                for (i, row) in wrapped.into_iter().enumerate() {
                     if i > 0 {
                         for _ in 0..spacing.line {
-                            out.push(Line::default());
+                            out.blank();
                         }
                     }
-                    out.push(row);
+                    // A heading holds onto whatever follows it. Body prose
+                    // guards its own edges: a break after the first row would
+                    // orphan it, and a break after the second-to-last would
+                    // widow the last. Two- and three-line paragraphs have no
+                    // row that escapes both rules, so they never split at
+                    // all, which is exactly what a typesetter would do.
+                    let keep = if is_heading {
+                        true
+                    } else {
+                        count > 1 && (i == 0 || i == count - 2)
+                    };
+                    out.content(row, keep);
                 }
             }
         }
         prev_was_gap = false;
     }
-    Laid { text: Text::from(out), block_rows }
+    Laid { text: Text::from(out.lines), block_rows, meta: out.meta }
+}
+
+/// Break laid-out rows into pages of `viewport` rows whose boundaries all
+/// land at acceptable spots, by ending a page early whenever the arithmetic
+/// boundary falls somewhere `keep_with_next` forbids. The rows moved down
+/// are replaced with blank padding, so every page except the last is
+/// exactly `viewport` rows tall and the reader's page-scroll arithmetic
+/// stays a plain multiplication.
+///
+/// Each new page also sheds structural blanks from its top, so no page
+/// opens with the tail of the previous page's paragraph gap.
+///
+/// One run of glued rows can exceed a whole page, for instance a heading
+/// atop a long paragraph in a very short window. There is no good break
+/// inside such a run, so the page is filled to the brim and the break is
+/// taken as it falls: a full page is the least bad option once every
+/// option is bad.
+pub(crate) fn paginate(laid: Laid, viewport: u16) -> Laid {
+    let viewport = viewport.max(1) as usize;
+    let mut lines = laid.text.lines;
+    let meta = laid.meta;
+    let total = lines.len();
+
+    // Where each input row lands in the output, plus one entry past the end,
+    // so block starts can be remapped after padding shifts everything.
+    let mut map: Vec<usize> = vec![0; total + 1];
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut i = 0;
+
+    while i < total {
+        // A fresh page starts flush: leading air is dropped, and any block
+        // that pointed into it resolves to the top of this page.
+        while i < total && meta[i].blank {
+            map[i] = out.len();
+            i += 1;
+        }
+        if i >= total {
+            break;
+        }
+
+        let page_start = out.len();
+        let mut end = (i + viewport).min(total);
+        if end < total {
+            // The page is full with more to come: walk the break upward
+            // until it sits after a row that allows one. Landing back at the
+            // page's own start means the entire page is one glued run, and
+            // the original, full-page break stands.
+            let mut candidate = end;
+            while candidate > i && meta[candidate - 1].keep_with_next {
+                candidate -= 1;
+            }
+            if candidate > i {
+                end = candidate;
+            }
+        }
+
+        for row in i..end {
+            map[row] = out.len();
+            out.push(std::mem::take(&mut lines[row]));
+        }
+        i = end;
+
+        // Pad a cut-short page out to the viewport, so the next page begins
+        // on a boundary. The last page needs no padding; it just ends.
+        if i < total {
+            while (out.len() - page_start) % viewport != 0 {
+                out.push(Line::default());
+            }
+        }
+    }
+    map[total] = out.len();
+
+    let block_rows = laid
+        .block_rows
+        .iter()
+        .map(|&row| map.get(row as usize).copied().unwrap_or(out.len()).min(u16::MAX as usize) as u16)
+        .collect();
+    Laid { text: Text::from(out), block_rows, meta: Vec::new() }
 }
 
 /// Break a block's spans into words, where a word is a run of non-whitespace
@@ -192,7 +350,12 @@ const TABLE_GUTTER: usize = 2;
 /// `line` blank rows separate one logical row from the next, matching the
 /// line spacing prose gets, so the reader's spacing setting applies to
 /// tables too.
-fn layout_table(table: &TableBlock, width: u16, line: u16) -> Vec<Line<'static>> {
+///
+/// Break hints: a page may end between logical rows but never inside one,
+/// since half a wrapped cell is gibberish, and never right after the header
+/// or its rule, which would strand the column names away from every value
+/// they name.
+fn layout_table(out: &mut Rows, table: &TableBlock, width: u16, line: u16) {
     let ncols = table
         .rows
         .iter()
@@ -201,7 +364,7 @@ fn layout_table(table: &TableBlock, width: u16, line: u16) -> Vec<Line<'static>>
         .max()
         .unwrap_or(0);
     if ncols == 0 {
-        return Vec::new();
+        return;
     }
 
     // A column's natural width is its widest cell, rendered on one line.
@@ -217,9 +380,10 @@ fn layout_table(table: &TableBlock, width: u16, line: u16) -> Vec<Line<'static>>
     let avail = (width as usize).saturating_sub(TABLE_GUTTER * (ncols - 1)).max(ncols);
     let widths = fit_columns(&natural, avail);
 
-    let mut out: Vec<Line<'static>> = Vec::new();
     if !table.header.is_empty() {
-        render_table_row(&mut out, &table.header, &widths);
+        // The header and its rule hold onto the first data row, so a page
+        // never ends on column names with nothing under them.
+        render_table_row(out, &table.header, &widths, true);
         let mut rule: Vec<Span<'static>> = Vec::new();
         for (col, col_width) in widths.iter().enumerate() {
             if col > 0 {
@@ -227,17 +391,16 @@ fn layout_table(table: &TableBlock, width: u16, line: u16) -> Vec<Line<'static>>
             }
             rule.push(Span::styled("─".repeat(*col_width), table.rule_style));
         }
-        out.push(Line::from(rule));
+        out.content(Line::from(rule), true);
     }
     for (i, row) in table.rows.iter().enumerate() {
         if i > 0 {
             for _ in 0..line {
-                out.push(Line::default());
+                out.blank();
             }
         }
-        render_table_row(&mut out, row, &widths);
+        render_table_row(out, row, &widths, false);
     }
-    out
 }
 
 /// Decide each column's width when the table must be squeezed. Columns that
@@ -280,7 +443,11 @@ fn fit_columns(natural: &[usize], avail: usize) -> Vec<usize> {
 /// the column's width, so the next column starts at the same place on every
 /// row. A cell that cannot wrap down to its column, such as one long
 /// unbreakable word, is clipped the way a wide code line would be.
-fn render_table_row(out: &mut Vec<Line<'static>>, cells: &[Vec<Span<'static>>], widths: &[usize]) {
+///
+/// Every terminal row but the logical row's last is glued to the next, so a
+/// page can never cut through the middle of a wrapped cell. `keep_all`
+/// glues the last one too, for the header, which must never end a page.
+fn render_table_row(out: &mut Rows, cells: &[Vec<Span<'static>>], widths: &[usize], keep_all: bool) {
     let empty: &[Span<'static>] = &[];
     let wrapped: Vec<Vec<Line<'static>>> = widths
         .iter()
@@ -311,7 +478,7 @@ fn render_table_row(out: &mut Vec<Line<'static>>, cells: &[Vec<Span<'static>>], 
                 spans.push(Span::raw(" ".repeat(widths[col].saturating_sub(used))));
             }
         }
-        out.push(Line::from(spans));
+        out.content(Line::from(spans), keep_all || row_index + 1 < height);
     }
 }
 
@@ -413,6 +580,123 @@ mod tests {
         RenderLine::Prose { spans: vec![Span::raw(text.to_string())], indent: 0, hang: 0 }
     }
 
+    /// The visible text of every output row, in order, with blank rows shown
+    /// as empty strings, so a whole pagination can be asserted at a glance.
+    fn rows_of(laid: &Laid) -> Vec<String> {
+        laid.text.lines.iter().map(text_of).collect()
+    }
+
+    const TIGHT: Spacing = Spacing { line: 0, paragraph: 1 };
+
+    /// A heading whose section would start overleaf moves to the next page
+    /// whole, taking at least the first lines of its paragraph with it. The
+    /// page it leaves behind ends short, padded with blank rows so the next
+    /// page still starts on an exact viewport boundary.
+    #[test]
+    fn a_heading_is_never_stranded_at_a_page_bottom() {
+        // One row of filler, a gap, a heading, a gap, then a two-line
+        // paragraph, which is atomic. At a viewport of 4, the arithmetic
+        // break lands right after the heading's gap.
+        let blocks = vec![prose("filler"), RenderLine::Gap, prose("Heading"), RenderLine::Gap, prose("alpha beta")];
+        let headings = [Heading { level: 1, text: "Heading".into(), block: 2 }];
+        let laid = paginate(layout(&blocks, &headings, 5, TIGHT), 4);
+
+        assert_eq!(
+            rows_of(&laid),
+            vec![
+                // Page one: the filler and a short page.
+                "filler", "", "", "",
+                // Page two: the heading with its whole paragraph.
+                "Heading", "", "alpha", "beta",
+            ]
+        );
+        // The heading's block entry must follow it to its new row.
+        assert_eq!(laid.block_rows[2], 4);
+    }
+
+    /// A paragraph never leaves its first line at the bottom of a page. If
+    /// only one line would fit, the whole paragraph waits for the next page.
+    #[test]
+    fn a_paragraph_first_line_is_never_orphaned() {
+        // Two rows of filler (an atomic two-line paragraph), a gap, then a
+        // four-line paragraph. At a viewport of 4 the arithmetic break falls
+        // after the big paragraph's first line.
+        let blocks = vec![prose("fill one"), RenderLine::Gap, prose("alpha beta gamma delta")];
+        let laid = paginate(layout(&blocks, &[], 5, TIGHT), 4);
+
+        assert_eq!(
+            rows_of(&laid),
+            vec![
+                "fill", "one", "", "",
+                "alpha", "beta", "gamma", "delta",
+            ]
+        );
+    }
+
+    /// A paragraph never sends its last line alone onto the next page: the
+    /// break backs up one line so at least two travel together.
+    #[test]
+    fn a_paragraph_last_line_is_never_widowed() {
+        // A four-line paragraph at a viewport of 3: the arithmetic break
+        // would leave "delta" alone overleaf, so "gamma" goes with it.
+        let blocks = vec![prose("alpha beta gamma delta")];
+        let laid = paginate(layout(&blocks, &[], 5, TIGHT), 3);
+
+        assert_eq!(rows_of(&laid), vec!["alpha", "beta", "", "gamma", "delta"]);
+    }
+
+    /// A gap that lands on a page boundary is simply consumed: the next page
+    /// starts flush with real content, never with leftover blank rows, and no
+    /// blank page is manufactured along the way.
+    #[test]
+    fn a_new_page_starts_flush_with_content() {
+        let blocks = vec![prose("alpha"), RenderLine::Gap, prose("beta")];
+        let laid = paginate(layout(&blocks, &[], 10, TIGHT), 1);
+
+        assert_eq!(rows_of(&laid), vec!["alpha", "beta"]);
+        // The gap block resolves to the top of the page it vanished into.
+        assert_eq!(laid.block_rows, vec![0, 1, 1]);
+    }
+
+    /// A logical table row whose cells wrapped to two terminal rows crosses
+    /// pages whole, and the header and rule travel with the first data row
+    /// rather than ending a page as a title with nothing under it.
+    #[test]
+    fn a_table_never_splits_mid_cell_or_after_its_header() {
+        let table = TableBlock {
+            header: vec![cell("id"), cell("meaning")],
+            rows: vec![vec![cell("a"), cell("alpha beta gamma")]],
+            rule_style: Style::default(),
+        };
+        // Width 14 squeezes the second column to 10, wrapping the data row
+        // onto two terminal rows. One filler row, then the table: at a
+        // viewport of 4 the arithmetic break would cut between them.
+        let blocks = vec![prose("filler"), RenderLine::Gap, RenderLine::Table(table)];
+        let laid = paginate(layout(&blocks, &[], 14, TIGHT), 4);
+
+        assert_eq!(
+            rows_of(&laid),
+            vec![
+                "filler", "", "", "",
+                "id  meaning", "──  ──────────", "a   alpha beta", "    gamma",
+            ]
+        );
+    }
+
+    /// A glued run taller than the page itself has no good break, so the page
+    /// is filled to the brim instead of thrashing or leaving an empty page.
+    #[test]
+    fn a_run_taller_than_the_page_fills_it() {
+        // A two-line heading? No: a heading followed by a long atomic
+        // paragraph, at a viewport too small for both. Every row is glued,
+        // so pagination must fall back to full pages.
+        let blocks = vec![prose("Heading"), RenderLine::Gap, prose("alpha beta gamma")];
+        let headings = [Heading { level: 1, text: "Heading".into(), block: 0 }];
+        let laid = paginate(layout(&blocks, &headings, 5, TIGHT), 2);
+
+        assert_eq!(rows_of(&laid), vec!["Heading", "", "alpha", "beta", "gamma"]);
+    }
+
     /// `block_rows` must report the row each block starts on, so a heading's
     /// block index can be turned into a page. A collapsed gap contributes no
     /// rows but still gets an entry, keeping the mapping one-to-one with the
@@ -420,7 +704,7 @@ mod tests {
     #[test]
     fn block_rows_track_where_each_block_begins() {
         let blocks = vec![prose("a b"), RenderLine::Gap, prose("c")];
-        let laid = layout(&blocks, 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 });
         // "a b" on row 0, one blank row for the paragraph gap, "c" on row 2.
         assert_eq!(laid.block_rows, vec![0, 1, 2]);
         assert_eq!(laid.text.lines.len(), 3);
@@ -432,7 +716,7 @@ mod tests {
     #[test]
     fn wide_verbatim_lines_are_clipped_not_wrapped() {
         let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("0123456789ABCDEF")))];
-        let laid = layout(&blocks, 8, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 8, Spacing { line: 0, paragraph: 1 });
 
         assert_eq!(laid.text.lines.len(), 1, "a wide code line must stay one row");
         let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -456,7 +740,7 @@ mod tests {
             ],
             rule_style: Style::default(),
         };
-        let laid = layout(&[RenderLine::Table(table)], 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&[RenderLine::Table(table)], &[], 40, Spacing { line: 0, paragraph: 1 });
         let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
         assert_eq!(
             rows,
@@ -479,7 +763,7 @@ mod tests {
             rows: vec![vec![cell("a"), cell("alpha beta gamma")]],
             rule_style: Style::default(),
         };
-        let laid = layout(&[RenderLine::Table(table)], 14, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&[RenderLine::Table(table)], &[], 14, Spacing { line: 0, paragraph: 1 });
         let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
         assert_eq!(
             rows,
@@ -495,7 +779,7 @@ mod tests {
     #[test]
     fn narrow_verbatim_lines_pass_through_unchanged() {
         let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("fits")))];
-        let laid = layout(&blocks, 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 });
         let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(rendered, "fits");
     }

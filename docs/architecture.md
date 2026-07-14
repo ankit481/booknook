@@ -199,6 +199,18 @@ does not end up scrolled to a strange half-page position. It reflows and
 lands back on the same page number, wherever that page's content now
 starts.
 
+The multiplication only works because every page is exactly one viewport
+tall, and that is now a promise `wrap::paginate` keeps rather than an
+accident of arithmetic. After layout produces the document's rows, each
+tagged with whether a page may end after it, pagination walks them page by
+page and moves any break that would land badly: a heading at a page
+bottom, a paragraph's first line stranded there, its last line alone at
+the top of the next page, a table row cut through a wrapped cell. The page
+ends a line or two early instead, padded with blank rows out to the
+viewport, the way a typesetter leaves a short page rather than a bad
+break. The padding keeps the page-to-row conversion a plain multiply while
+letting the breaks themselves be chosen.
+
 Because the true number of pages is not known until layout has happened,
 `events::handle_document_key` sometimes asks for a page that does not
 exist yet. Jumping to the last page, bound to `G`, sets `page` to `u16::MAX`
