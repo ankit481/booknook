@@ -115,10 +115,14 @@ impl Rows {
 /// into a second row, which would break its alignment.
 ///
 /// `headings` tells the row-tagging which prose blocks are headings, since
-/// a heading must never be the last thing on a page. The result is not yet
-/// page-shaped: hand it to `paginate` with a viewport height to get rows
-/// whose page boundaries all fall at defensible breaks.
-pub(crate) fn layout(blocks: &[RenderLine], headings: &[Heading], width: u16, spacing: Spacing) -> Laid {
+/// a heading must never be the last thing on a page. `pan` shifts every
+/// verbatim line that many columns to the left, the keyboard equivalent of
+/// a horizontal scrollbar for code wider than the column; prose is
+/// untouched, since it wraps to fit. The result is not yet page-shaped:
+/// hand it to `paginate` with a viewport height to get rows whose page
+/// boundaries all fall at defensible breaks. Panning never changes row
+/// counts, so the pages hold still while the code slides.
+pub(crate) fn layout(blocks: &[RenderLine], headings: &[Heading], width: u16, spacing: Spacing, pan: u16) -> Laid {
     // Heading block indices arrive in document order, so membership is a
     // binary search rather than a set build per frame.
     let heading_blocks: Vec<usize> = headings.iter().map(|h| h.block).collect();
@@ -145,7 +149,9 @@ pub(crate) fn layout(blocks: &[RenderLine], headings: &[Heading], width: u16, sp
                 prev_was_gap = true;
                 continue;
             }
-            RenderLine::Verbatim(line) => out.content(clip_line(line, width as usize), false),
+            RenderLine::Verbatim(line) => {
+                out.content(pan_line(line, width as usize, pan as usize), false)
+            }
             RenderLine::Table(table) => layout_table(&mut out, table, width, spacing.line),
             RenderLine::Prose { spans, indent, hang } => {
                 let is_heading = heading_blocks.binary_search(&index).is_ok();
@@ -489,6 +495,56 @@ fn indent_line(mut spans: Vec<Span<'static>>, indent: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The width of the document's widest verbatim line, in columns. This is
+/// the bound sideways panning clamps against: panning past it would leave
+/// nothing on screen to reveal.
+pub(crate) fn max_verbatim_width(blocks: &[RenderLine]) -> u16 {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderLine::Verbatim(line) => {
+                Some(line.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum::<usize>())
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .min(u16::MAX as usize) as u16
+}
+
+/// Shift a verbatim line `pan` columns to the left, then clip it to the
+/// column as usual. The dropped left edge is marked with a `‹`, mirroring
+/// the `›` the right edge already gets, so a panned line reads as a window
+/// onto something wider in both directions. A wide character straddling the
+/// cut is dropped whole rather than half-shown.
+fn pan_line(line: &Line<'static>, width: usize, pan: usize) -> Line<'static> {
+    if pan == 0 {
+        return clip_line(line, width);
+    }
+    let marker_style = line.spans.first().map(|s| s.style).unwrap_or_default();
+    let mut spans: Vec<Span<'static>> = vec![Span::styled("‹".to_string(), marker_style)];
+    let mut skipped = 0usize;
+    for span in &line.spans {
+        if skipped >= pan {
+            spans.push(span.clone());
+            continue;
+        }
+        let mut kept = String::new();
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if skipped < pan {
+                skipped += ch_width;
+            } else {
+                kept.push(ch);
+            }
+        }
+        if !kept.is_empty() {
+            spans.push(Span::styled(kept, span.style));
+        }
+    }
+    clip_line(&Line::from(spans), width)
+}
+
 /// Cut a finished line down to `width` columns, keeping each kept piece's
 /// style. This is what stops a wide code line or ASCII diagram from being
 /// soft-wrapped into a second row and losing its alignment: it is clipped at
@@ -599,7 +655,7 @@ mod tests {
         // break lands right after the heading's gap.
         let blocks = vec![prose("filler"), RenderLine::Gap, prose("Heading"), RenderLine::Gap, prose("alpha beta")];
         let headings = [Heading { level: 1, text: "Heading".into(), block: 2 }];
-        let laid = paginate(layout(&blocks, &headings, 5, TIGHT), 4);
+        let laid = paginate(layout(&blocks, &headings, 5, TIGHT, 0), 4);
 
         assert_eq!(
             rows_of(&laid),
@@ -622,7 +678,7 @@ mod tests {
         // four-line paragraph. At a viewport of 4 the arithmetic break falls
         // after the big paragraph's first line.
         let blocks = vec![prose("fill one"), RenderLine::Gap, prose("alpha beta gamma delta")];
-        let laid = paginate(layout(&blocks, &[], 5, TIGHT), 4);
+        let laid = paginate(layout(&blocks, &[], 5, TIGHT, 0), 4);
 
         assert_eq!(
             rows_of(&laid),
@@ -640,7 +696,7 @@ mod tests {
         // A four-line paragraph at a viewport of 3: the arithmetic break
         // would leave "delta" alone overleaf, so "gamma" goes with it.
         let blocks = vec![prose("alpha beta gamma delta")];
-        let laid = paginate(layout(&blocks, &[], 5, TIGHT), 3);
+        let laid = paginate(layout(&blocks, &[], 5, TIGHT, 0), 3);
 
         assert_eq!(rows_of(&laid), vec!["alpha", "beta", "", "gamma", "delta"]);
     }
@@ -651,7 +707,7 @@ mod tests {
     #[test]
     fn a_new_page_starts_flush_with_content() {
         let blocks = vec![prose("alpha"), RenderLine::Gap, prose("beta")];
-        let laid = paginate(layout(&blocks, &[], 10, TIGHT), 1);
+        let laid = paginate(layout(&blocks, &[], 10, TIGHT, 0), 1);
 
         assert_eq!(rows_of(&laid), vec!["alpha", "beta"]);
         // The gap block resolves to the top of the page it vanished into.
@@ -672,7 +728,7 @@ mod tests {
         // onto two terminal rows. One filler row, then the table: at a
         // viewport of 4 the arithmetic break would cut between them.
         let blocks = vec![prose("filler"), RenderLine::Gap, RenderLine::Table(table)];
-        let laid = paginate(layout(&blocks, &[], 14, TIGHT), 4);
+        let laid = paginate(layout(&blocks, &[], 14, TIGHT, 0), 4);
 
         assert_eq!(
             rows_of(&laid),
@@ -692,7 +748,7 @@ mod tests {
         // so pagination must fall back to full pages.
         let blocks = vec![prose("Heading"), RenderLine::Gap, prose("alpha beta gamma")];
         let headings = [Heading { level: 1, text: "Heading".into(), block: 0 }];
-        let laid = paginate(layout(&blocks, &headings, 5, TIGHT), 2);
+        let laid = paginate(layout(&blocks, &headings, 5, TIGHT, 0), 2);
 
         assert_eq!(rows_of(&laid), vec!["Heading", "", "alpha", "beta", "gamma"]);
     }
@@ -704,7 +760,7 @@ mod tests {
     #[test]
     fn block_rows_track_where_each_block_begins() {
         let blocks = vec![prose("a b"), RenderLine::Gap, prose("c")];
-        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 }, 0);
         // "a b" on row 0, one blank row for the paragraph gap, "c" on row 2.
         assert_eq!(laid.block_rows, vec![0, 1, 2]);
         assert_eq!(laid.text.lines.len(), 3);
@@ -716,7 +772,7 @@ mod tests {
     #[test]
     fn wide_verbatim_lines_are_clipped_not_wrapped() {
         let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("0123456789ABCDEF")))];
-        let laid = layout(&blocks, &[], 8, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 8, Spacing { line: 0, paragraph: 1 }, 0);
 
         assert_eq!(laid.text.lines.len(), 1, "a wide code line must stay one row");
         let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -740,7 +796,7 @@ mod tests {
             ],
             rule_style: Style::default(),
         };
-        let laid = layout(&[RenderLine::Table(table)], &[], 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&[RenderLine::Table(table)], &[], 40, Spacing { line: 0, paragraph: 1 }, 0);
         let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
         assert_eq!(
             rows,
@@ -763,7 +819,7 @@ mod tests {
             rows: vec![vec![cell("a"), cell("alpha beta gamma")]],
             rule_style: Style::default(),
         };
-        let laid = layout(&[RenderLine::Table(table)], &[], 14, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&[RenderLine::Table(table)], &[], 14, Spacing { line: 0, paragraph: 1 }, 0);
         let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
         assert_eq!(
             rows,
@@ -776,10 +832,45 @@ mod tests {
         );
     }
 
+    /// A panned verbatim line shows a window into its middle: a `‹` marks
+    /// the columns dropped on the left, the usual `›` the ones still hidden
+    /// on the right, and the visible slice starts exactly `pan` columns in.
+    #[test]
+    fn a_panned_verbatim_line_shows_its_middle() {
+        let line = Line::from(Span::raw("0123456789ABCDEF"));
+        let panned = pan_line(&line, 8, 4);
+        let rendered: String = panned.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "‹456789›");
+    }
+
+    /// Panning past a short line leaves just the left marker, so a page of
+    /// mixed-width code reads as uniformly shifted rather than as lines
+    /// mysteriously vanishing.
+    #[test]
+    fn panning_past_a_short_line_leaves_the_marker() {
+        let line = Line::from(Span::raw("abc"));
+        let panned = pan_line(&line, 8, 4);
+        let rendered: String = panned.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered, "‹");
+    }
+
+    /// The widest verbatim line is what panning clamps against; prose and
+    /// tables do not count, since they wrap to fit and never pan.
+    #[test]
+    fn max_verbatim_width_measures_only_code() {
+        let blocks = vec![
+            prose("a paragraph that is quite long and wraps"),
+            RenderLine::Verbatim(Line::from(Span::raw("0123456789"))),
+            RenderLine::Verbatim(Line::from(Span::raw("0123"))),
+        ];
+        assert_eq!(max_verbatim_width(&blocks), 10);
+        assert_eq!(max_verbatim_width(&[prose("no code here")]), 0);
+    }
+
     #[test]
     fn narrow_verbatim_lines_pass_through_unchanged() {
         let blocks = vec![RenderLine::Verbatim(Line::from(Span::raw("fits")))];
-        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 });
+        let laid = layout(&blocks, &[], 40, Spacing { line: 0, paragraph: 1 }, 0);
         let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(rendered, "fits");
     }

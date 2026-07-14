@@ -145,15 +145,23 @@ pub(crate) fn turn_direction(code: KeyCode) -> Option<Direction> {
     }
 }
 
+/// How many columns one press of `,` or `.` pans wide code sideways. Big
+/// enough to make progress across a wide diagram, small enough that the
+/// eye keeps its place between presses.
+const PAN_STEP: u16 = 8;
+
 /// Turn `app.page` by one step in `dir`, clamped at zero. The upper bound is
 /// not known here, since the last page depends on the viewport, so a forward
-/// turn is left to be clamped at draw time the same way `G` is.
+/// turn is left to be clamped at draw time the same way `G` is. Turning a
+/// page also ends any sideways pan: the lean-in to inspect a wide figure is
+/// over once the reader moves on.
 fn turn_page(app: &mut App, dir: Direction) {
     let step = if app.spread { 2 } else { 1 };
     match dir {
         Direction::Forward => app.page = app.page.saturating_add(step),
         Direction::Back => app.page = app.page.saturating_sub(step),
     }
+    app.pan = 0;
 }
 
 /// After a turn, fold any keys already waiting in the queue into the same
@@ -190,12 +198,25 @@ fn handle_document_key(app: &mut App, code: KeyCode) {
         return;
     }
     match code {
-        KeyCode::Char('g') => app.page = 0,
+        KeyCode::Char('g') => {
+            app.page = 0;
+            app.pan = 0;
+        }
         // The last page number is not known until the `ui` module computes
         // it from the viewport, so this asks for "as far as possible" and
         // lets the draw step clamp it to something real.
-        KeyCode::Char('G') => app.page = u16::MAX,
+        KeyCode::Char('G') => {
+            app.page = u16::MAX;
+            app.pan = 0;
+        }
         KeyCode::Char('o') => app.focus = Focus::Files,
+
+        // Pan wide code blocks and diagrams sideways, the keyboard version
+        // of a horizontal scrollbar. Like `G`, the upper bound is not known
+        // here: only layout knows the widest verbatim line at the current
+        // width, so this asks for more and lets the draw step clamp it.
+        KeyCode::Char('.' | '>') => app.pan = app.pan.saturating_add(PAN_STEP),
+        KeyCode::Char(',' | '<') => app.pan = app.pan.saturating_sub(PAN_STEP),
 
         // Typography, adjustable while reading. Changing any of these
         // reflows the document on the next frame, which can move the text
@@ -208,5 +229,27 @@ fn handle_document_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('-') => app.page_width = app.page_width.saturating_sub(2).max(MIN_PAGE_WIDTH),
         KeyCode::Char('=' | '+') => app.page_width = (app.page_width + 2).min(MAX_PAGE_WIDTH),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panning steps sideways with `.` and back with `,`, and a page turn
+    /// drops the pan entirely: the lean-in to a wide figure ends when the
+    /// reader moves on.
+    #[test]
+    fn pan_steps_and_a_page_turn_resets_it() {
+        let mut app = App::new();
+        handle_document_key(&mut app, KeyCode::Char('.'));
+        handle_document_key(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.pan, 2 * PAN_STEP);
+        handle_document_key(&mut app, KeyCode::Char(','));
+        assert_eq!(app.pan, PAN_STEP);
+
+        handle_document_key(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.pan, 0, "turning the page ends the pan");
+        assert!(app.page_turn, "the turn itself must still register");
     }
 }
