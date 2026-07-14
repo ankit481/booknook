@@ -79,7 +79,9 @@ was left out on purpose.
 - Correct handling of smart punctuation, so `country's` and `$78.02` render
   as words rather than as fragments with spaces wedged into them
 - Code blocks and ASCII diagrams keep their exact shape, clipped at the page
-  edge rather than reflowed, so their alignment survives
+  edge rather than reflowed, so their alignment survives. When one is wider
+  than the column, `,` and `.` pan it sideways, the keyboard version of a
+  horizontal scrollbar, with `‹` and `›` marking what lies past each edge
 
 ## Install
 
@@ -144,6 +146,7 @@ In the reader:
 | `-` / `+` | Narrow or widen the reading column |
 | `[` / `]` | Less or more space between lines |
 | `{` / `}` | Less or more space between paragraphs |
+| `,` / `.` | Pan wide code blocks sideways; a page turn resets |
 | `o` | Back to the file browser |
 
 ## Getting the page right

@@ -121,7 +121,14 @@ fn draw_single_page(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     // Because this runs every frame against the current width and height,
     // resizing the terminal reflows and re-breaks the pages for free.
     let viewport = reading_area.height.max(1);
-    let laid = wrap::paginate(wrap::layout(&app.blocks, &app.headings, reading_area.width, app.spacing), viewport);
+    // Sideways pan is clamped to the widest code line's real overflow, the
+    // same draw-time clamping `page` gets: the event handler asks for more
+    // and the one place that knows the bound trims it.
+    app.pan = app.pan.min(wrap::max_verbatim_width(&app.blocks).saturating_sub(reading_area.width));
+    let laid = wrap::paginate(
+        wrap::layout(&app.blocks, &app.headings, reading_area.width, app.spacing, app.pan),
+        viewport,
+    );
     let total_rows = laid.text.lines.len() as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
     let paragraph = Paragraph::new(laid.text)
@@ -169,7 +176,11 @@ fn draw_spread(frame: &mut Frame, app: &mut App, area: Rect) -> u16 {
     let right_area = inset_horizontal(inset_vertical(cols[2], 3, 2), 2, 2);
 
     let viewport = left_area.height.max(1);
-    let laid = wrap::paginate(wrap::layout(&app.blocks, &app.headings, left_area.width, app.spacing), viewport);
+    app.pan = app.pan.min(wrap::max_verbatim_width(&app.blocks).saturating_sub(left_area.width));
+    let laid = wrap::paginate(
+        wrap::layout(&app.blocks, &app.headings, left_area.width, app.spacing, app.pan),
+        viewport,
+    );
     let text = laid.text;
     let total_rows = text.lines.len() as u16;
     let page_count = total_rows.div_ceil(viewport).max(1);
@@ -444,8 +455,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
                 format!("page {}", app.page + 1)
             };
             let flip = if app.animate { " · flip on" } else { "" };
+            let pan = if app.pan > 0 { format!(" · pan {}", app.pan) } else { String::new() };
             format!(
-                "  {position} / {page_count}   line {} · para {} · width {} · {}{flip}   [ ] {{ }} -/+ t · a · Tab sidebar · q",
+                "  {position} / {page_count}   line {} · para {} · width {}{pan} · {}{flip}   [ ] {{ }} -/+ , . t · a · Tab sidebar · q",
                 app.spacing.line, app.spacing.paragraph, app.page_width, theme.name
             )
         }
@@ -615,6 +627,30 @@ mod tests {
         let mut app = App::new();
         app.focus = Focus::Document;
         assert!(app.sidebar_visible(), "no document means the sidebar stays");
+    }
+
+    /// Sideways pan is clamped at draw time to the widest code line's real
+    /// overflow, so asking for "further" lands exactly at the end of the
+    /// content, and the panned line carries the left-edge marker on screen.
+    #[test]
+    fn pan_clamps_to_the_widest_code_line() {
+        let mut app = App::new();
+        let doc = format!("Intro text.\n\n```\n{}\n```\n", "x".repeat(80));
+        let parsed = markdown::render_markdown(&doc, app.theme());
+        app.blocks = parsed.blocks;
+        app.headings = parsed.headings;
+        app.focus = Focus::Document;
+        app.pan = u16::MAX;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        // The code line is two indent columns plus eighty x's; the reading
+        // column is page_width 58 minus four columns of margins. Whatever
+        // those exact numbers, the clamp must land at overflow, not MAX.
+        let overflow = (2 + 80u16).saturating_sub(58 - 4);
+        assert_eq!(app.pan, overflow, "pan should clamp to the actual overflow");
+        assert!(screen(&terminal).contains('‹'), "a panned line should mark its cut left edge");
     }
 
     #[test]

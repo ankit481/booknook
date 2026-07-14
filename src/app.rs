@@ -92,6 +92,14 @@ pub(crate) struct App {
     /// asks for the last page without computing it here.
     pub(crate) pending_jump: Option<usize>,
     pub(crate) page: u16,
+    /// How many columns wide code blocks and diagrams are shifted left, the
+    /// keyboard version of GitHub's horizontal scrollbar. Only verbatim
+    /// lines move; prose is already wrapped to fit and stays put. The `ui`
+    /// module clamps this every frame to the widest verbatim line's actual
+    /// overflow, the way it clamps `page`, so panning stops exactly where
+    /// the content ends. Reset on page turns and jumps: a pan is a way of
+    /// leaning in to inspect a wide figure, not a persistent view.
+    pub(crate) pan: u16,
     /// Whether the last draw showed two pages side by side. Set by the
     /// `ui` module every frame, since it is the only place that knows the
     /// current width, and read by the event handler to decide whether a
@@ -148,6 +156,7 @@ impl App {
             active_heading: None,
             pending_jump: None,
             page: 0,
+            pan: 0,
             spread: false,
             page_width: 58,
             // No blank row inside a paragraph, one between paragraphs. A
@@ -230,6 +239,7 @@ impl App {
         self.active_heading = None;
         self.pending_jump = None;
         self.page = self.saved_page(path);
+        self.pan = 0;
         self.focus = Focus::Document;
         Ok(())
     }
@@ -262,6 +272,7 @@ impl App {
         self.active_heading = None;
         self.pending_jump = None;
         self.page = 0;
+        self.pan = 0;
         self.focus = Focus::Document;
     }
 
@@ -289,6 +300,7 @@ impl App {
     pub(crate) fn jump_to_heading(&mut self, toc_index: usize) {
         if let Some(heading) = self.headings.get(toc_index) {
             self.pending_jump = Some(heading.block);
+            self.pan = 0;
             self.focus = Focus::Document;
         }
     }
