@@ -69,7 +69,7 @@ pub(crate) fn turn(
     area: Rect,
     dir: Direction,
 ) -> Result<()> {
-    let doc = ui::document_area(area);
+    let doc = ui::document_area(area, app.sidebar_visible());
     if doc.width == 0 || doc.height == 0 {
         terminal.draw(|frame| ui::draw(frame, app))?;
         return Ok(());
