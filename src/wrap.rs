@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::markdown::RenderLine;
+use crate::markdown::{RenderLine, TableBlock};
 
 /// One word, as a run of styled pieces.
 ///
@@ -78,6 +78,9 @@ pub(crate) fn layout(blocks: &[RenderLine], width: u16, spacing: Spacing) -> Lai
                 continue;
             }
             RenderLine::Verbatim(line) => out.push(clip_line(line, width as usize)),
+            RenderLine::Table(table) => {
+                out.extend(layout_table(table, width, spacing.line));
+            }
             RenderLine::Prose { spans, indent, hang } => {
                 for (i, row) in wrap_prose(spans, *indent, *hang, width).into_iter().enumerate() {
                     if i > 0 {
@@ -178,6 +181,138 @@ fn wrap_prose(spans: &[Span<'static>], indent: u16, hang: u16, width: u16) -> Ve
         rows.push(indent_line(current, row_indent(rows.len())));
     }
     rows
+}
+
+/// Blank columns between adjacent table columns.
+const TABLE_GUTTER: usize = 2;
+
+/// Lay a table out at the page's width: size the columns, then render the
+/// header, a rule under it, and every row. Cells word-wrap inside their own
+/// column, so a wide table gets taller rather than spilling off the page.
+/// `line` blank rows separate one logical row from the next, matching the
+/// line spacing prose gets, so the reader's spacing setting applies to
+/// tables too.
+fn layout_table(table: &TableBlock, width: u16, line: u16) -> Vec<Line<'static>> {
+    let ncols = table
+        .rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(table.header.len()))
+        .max()
+        .unwrap_or(0);
+    if ncols == 0 {
+        return Vec::new();
+    }
+
+    // A column's natural width is its widest cell, rendered on one line.
+    let mut natural = vec![0usize; ncols];
+    for row in std::iter::once(&table.header).chain(&table.rows) {
+        for (col, cell) in row.iter().enumerate() {
+            let cell_width: usize =
+                cell.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            natural[col] = natural[col].max(cell_width);
+        }
+    }
+
+    let avail = (width as usize).saturating_sub(TABLE_GUTTER * (ncols - 1)).max(ncols);
+    let widths = fit_columns(&natural, avail);
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+    if !table.header.is_empty() {
+        render_table_row(&mut out, &table.header, &widths);
+        let mut rule: Vec<Span<'static>> = Vec::new();
+        for (col, col_width) in widths.iter().enumerate() {
+            if col > 0 {
+                rule.push(Span::raw(" ".repeat(TABLE_GUTTER)));
+            }
+            rule.push(Span::styled("─".repeat(*col_width), table.rule_style));
+        }
+        out.push(Line::from(rule));
+    }
+    for (i, row) in table.rows.iter().enumerate() {
+        if i > 0 {
+            for _ in 0..line {
+                out.push(Line::default());
+            }
+        }
+        render_table_row(&mut out, row, &widths);
+    }
+    out
+}
+
+/// Decide each column's width when the table must be squeezed. Columns that
+/// fit inside an equal share of the available width keep their natural
+/// size, and the space they leave unused is re-divided among the wider
+/// ones, so a short id column never pays for a long description column.
+fn fit_columns(natural: &[usize], avail: usize) -> Vec<usize> {
+    if natural.iter().sum::<usize>() <= avail {
+        return natural.to_vec();
+    }
+    let mut widths = vec![0usize; natural.len()];
+    let mut pending: Vec<usize> = (0..natural.len()).collect();
+    let mut left = avail;
+    loop {
+        let fair = (left / pending.len()).max(1);
+        let fitting: Vec<usize> = pending.iter().copied().filter(|&i| natural[i] <= fair).collect();
+        if fitting.is_empty() {
+            // Every remaining column wants more than its share: split what
+            // is left evenly, handing the first few one extra cell each so
+            // no column is left short of the total.
+            let n = pending.len();
+            for (k, &i) in pending.iter().enumerate() {
+                widths[i] = (left / n + usize::from(k < left % n)).max(1);
+            }
+            return widths;
+        }
+        for &i in &fitting {
+            widths[i] = natural[i];
+            left = left.saturating_sub(natural[i]);
+        }
+        pending.retain(|i| !fitting.contains(i));
+        if pending.is_empty() {
+            return widths;
+        }
+    }
+}
+
+/// Render one logical table row as however many terminal rows its tallest
+/// cell needs. Each cell is word-wrapped to its column and padded out to
+/// the column's width, so the next column starts at the same place on every
+/// row. A cell that cannot wrap down to its column, such as one long
+/// unbreakable word, is clipped the way a wide code line would be.
+fn render_table_row(out: &mut Vec<Line<'static>>, cells: &[Vec<Span<'static>>], widths: &[usize]) {
+    let empty: &[Span<'static>] = &[];
+    let wrapped: Vec<Vec<Line<'static>>> = widths
+        .iter()
+        .enumerate()
+        .map(|(col, col_width)| {
+            let spans = cells.get(col).map(Vec::as_slice).unwrap_or(empty);
+            wrap_prose(spans, 0, 0, *col_width as u16)
+                .iter()
+                .map(|row| clip_line(row, *col_width))
+                .collect()
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(0);
+    for row_index in 0..height {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (col, cell_rows) in wrapped.iter().enumerate() {
+            if col > 0 {
+                spans.push(Span::raw(" ".repeat(TABLE_GUTTER)));
+            }
+            let mut used = 0usize;
+            if let Some(cell_row) = cell_rows.get(row_index) {
+                used = cell_row.spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+                spans.extend(cell_row.spans.iter().cloned());
+            }
+            // The last column carries no trailing padding; there is nothing
+            // to its right to keep aligned.
+            if col < widths.len() - 1 {
+                spans.push(Span::raw(" ".repeat(widths[col].saturating_sub(used))));
+            }
+        }
+        out.push(Line::from(spans));
+    }
 }
 
 fn indent_line(mut spans: Vec<Span<'static>>, indent: usize) -> Line<'static> {
@@ -302,6 +437,59 @@ mod tests {
         assert_eq!(laid.text.lines.len(), 1, "a wide code line must stay one row");
         let rendered: String = laid.text.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(rendered, "0123456›", "clipped to width with a cut marker");
+    }
+
+    fn cell(text: &str) -> Vec<Span<'static>> {
+        vec![Span::raw(text.to_string())]
+    }
+
+    /// With room to spare, every column takes its natural width, cells pad
+    /// out so columns start at the same place on every row, and the header
+    /// gets a rule under it.
+    #[test]
+    fn table_columns_line_up_under_a_header_rule() {
+        let table = TableBlock {
+            header: vec![cell("Column"), cell("What it is")],
+            rows: vec![
+                vec![cell("id"), cell("Unique id")],
+                vec![cell("title"), cell("Incident title")],
+            ],
+            rule_style: Style::default(),
+        };
+        let laid = layout(&[RenderLine::Table(table)], 40, Spacing { line: 0, paragraph: 1 });
+        let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "Column  What it is",
+                "──────  ──────────────",
+                "id      Unique id",
+                "title   Incident title",
+            ]
+        );
+    }
+
+    /// A table wider than the page wraps cell text inside its column
+    /// instead of spilling past the edge: the narrow column keeps its
+    /// natural width, the wide one absorbs the squeeze and grows downward.
+    #[test]
+    fn wide_tables_wrap_cells_inside_their_columns() {
+        let table = TableBlock {
+            header: vec![cell("id"), cell("meaning")],
+            rows: vec![vec![cell("a"), cell("alpha beta gamma")]],
+            rule_style: Style::default(),
+        };
+        let laid = layout(&[RenderLine::Table(table)], 14, Spacing { line: 0, paragraph: 1 });
+        let rows: Vec<String> = laid.text.lines.iter().map(text_of).collect();
+        assert_eq!(
+            rows,
+            vec![
+                "id  meaning",
+                "──  ──────────",
+                "a   alpha beta",
+                "    gamma",
+            ]
+        );
     }
 
     #[test]

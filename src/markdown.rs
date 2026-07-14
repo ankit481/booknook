@@ -37,10 +37,28 @@ enum ListKind {
 /// starts at its nesting indent and wraps to a deeper one, so that
 /// continuation text lines up under the item's words rather than under its
 /// bullet.
+///
+/// `Table` is a grid of cells that must be laid out together: how wide each
+/// column gets depends on every cell in that column and on the width of the
+/// page, so the decision is deferred to the `wrap` module along with all the
+/// other width decisions.
 pub(crate) enum RenderLine {
     Prose { spans: Vec<Span<'static>>, indent: u16, hang: u16 },
     Verbatim(Line<'static>),
+    Table(TableBlock),
     Gap,
+}
+
+/// A parsed table, kept as bare cells rather than finished rows because no
+/// row can be rendered until every column's width is known, and widths
+/// depend on the page. Each cell is the spans collected between its start
+/// and end events, so inline styling inside cells survives.
+pub(crate) struct TableBlock {
+    pub(crate) header: Vec<Vec<Span<'static>>>,
+    pub(crate) rows: Vec<Vec<Vec<Span<'static>>>>,
+    /// The style of the rule drawn under the header row. Baked in at parse
+    /// time like every other color, because the `wrap` module has no theme.
+    pub(crate) rule_style: Style,
 }
 
 /// One entry in the document's table of contents.
@@ -107,6 +125,12 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Parsed {
     // heading opens and taken back out when it closes, at which point the
     // text collected in `spans` is what the contents list should show.
     let mut heading_level: Option<u8> = None;
+    // Table cells accumulate in `spans` like any other text and are moved
+    // into `table_cells` as each cell closes, then into the header or a row
+    // as the enclosing head or row closes.
+    let mut table_header: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut table_rows: Vec<Vec<Vec<Span<'static>>>> = Vec::new();
+    let mut table_cells: Vec<Vec<Span<'static>>> = Vec::new();
 
     for ev in parser {
         match ev {
@@ -183,6 +207,13 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Parsed {
                     hang = nesting + UnicodeWidthStr::width(marker.as_str()) as u16;
                     spans.push(Span::styled(marker, Style::default().fg(theme.muted)));
                 }
+                Tag::Table(_) => {
+                    flush_prose(&mut blocks, &mut spans, indent, hang);
+                }
+                Tag::TableHead => {
+                    style_stack.push(style);
+                    style = style.add_modifier(Modifier::BOLD);
+                }
                 _ => {}
             },
             MdEvent::End(tag) => match tag {
@@ -237,6 +268,24 @@ pub(crate) fn render_markdown(input: &str, theme: &Theme) -> Parsed {
                     if list_stack.is_empty() {
                         blocks.push(RenderLine::Gap);
                     }
+                }
+                TagEnd::TableCell => {
+                    table_cells.push(std::mem::take(&mut spans));
+                }
+                TagEnd::TableHead => {
+                    table_header = std::mem::take(&mut table_cells);
+                    style = style_stack.pop().unwrap_or_default();
+                }
+                TagEnd::TableRow => {
+                    table_rows.push(std::mem::take(&mut table_cells));
+                }
+                TagEnd::Table => {
+                    blocks.push(RenderLine::Table(TableBlock {
+                        header: std::mem::take(&mut table_header),
+                        rows: std::mem::take(&mut table_rows),
+                        rule_style: Style::default().fg(theme.muted),
+                    }));
+                    blocks.push(RenderLine::Gap);
                 }
                 _ => {}
             },
@@ -333,5 +382,30 @@ mod tests {
         for heading in &parsed.headings {
             assert_eq!(prose_text(&parsed.blocks, heading.block).as_deref(), Some(heading.text.as_str()));
         }
+    }
+
+    /// A markdown table comes out as a single `Table` block whose cells are
+    /// kept separate, rather than its text fusing into one prose blob. Cell
+    /// text survives inline formatting such as code spans.
+    #[test]
+    fn tables_come_out_as_cell_grids() {
+        let input = "\
+| Column | What it is |
+|--------|-----------|
+| `id` | Unique id |
+| title | Incident title |
+";
+        let parsed = render_markdown(input, &THEMES[0]);
+
+        let Some(RenderLine::Table(table)) = parsed.blocks.first() else {
+            panic!("expected the first block to be a table");
+        };
+        let text = |cell: &[Span<'static>]| cell.iter().map(|s| s.content.as_ref()).collect::<String>();
+
+        assert_eq!(table.header.iter().map(|c| text(c)).collect::<Vec<_>>(), vec!["Column", "What it is"]);
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(text(&table.rows[0][0]), "id");
+        assert_eq!(text(&table.rows[0][1]), "Unique id");
+        assert_eq!(text(&table.rows[1][1]), "Incident title");
     }
 }
