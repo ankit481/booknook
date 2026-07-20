@@ -117,6 +117,7 @@ Available anywhere:
 |---|---|
 | `Tab` | Move focus: files, then contents, then the reader, then back |
 | `t` | Cycle color theme |
+| `r` | Reload the open document from disk |
 | `q` / `Esc` | Quit |
 
 In the file browser:

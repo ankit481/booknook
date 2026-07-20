@@ -457,7 +457,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, page_count: u16) {
             let flip = if app.animate { " · flip on" } else { "" };
             let pan = if app.pan > 0 { format!(" · pan {}", app.pan) } else { String::new() };
             format!(
-                "  {position} / {page_count}   line {} · para {} · width {}{pan} · {}{flip}   [ ] {{ }} -/+ , . t · a · Tab sidebar · q",
+                "  {position} / {page_count}   line {} · para {} · width {}{pan} · {}{flip}   [ ] {{ }} -/+ , . t · a · r · Tab sidebar · q",
                 app.spacing.line, app.spacing.paragraph, app.page_width, theme.name
             )
         }

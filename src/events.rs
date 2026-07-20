@@ -61,6 +61,10 @@ pub(crate) fn handle_events(app: &mut App) -> Result<()> {
             app.animate = !app.animate;
             return Ok(());
         }
+        KeyCode::Char('r') => {
+            app.reload();
+            return Ok(());
+        }
         _ => {}
     }
 

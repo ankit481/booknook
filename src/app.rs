@@ -204,6 +204,44 @@ impl App {
         self.headings = parsed.headings;
     }
 
+    /// Re-read the open document from disk and render it again, so edits made
+    /// elsewhere show up without closing and reopening the file. The page
+    /// number is deliberately kept: the `ui` module already clamps it to the
+    /// document's real length every frame, so if the file shrank the reader
+    /// lands on the new last page rather than past it. A gist has no path to
+    /// go back to, so with nothing on disk this is a no-op, as it is when the
+    /// file has vanished mid-session; keeping the stale content is the same
+    /// gentler failure `cycle_theme` chooses.
+    pub(crate) fn reload(&mut self) {
+        let Some(path) = self.current.clone() else { return };
+        let parsed = if epub::is_epub(&path) {
+            match epub::load(&path, self.theme()) {
+                Ok(book) => book.parsed,
+                Err(_) => return,
+            }
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let parsed = markdown::render_markdown(&raw, self.theme());
+                    // The fresh text replaces the copy held for theme
+                    // switches, so a later `t` re-renders what is actually
+                    // on screen, not the version from before the reload.
+                    self.source = Source::Markdown(raw);
+                    parsed
+                }
+                Err(_) => return,
+            }
+        };
+        self.blocks = parsed.blocks;
+        self.headings = parsed.headings;
+        // The heading list may have shrunk along with the document, so the
+        // contents cursor is pulled back inside it. A jump requested before
+        // the reload would point into the old block numbering, so it is
+        // dropped rather than landing somewhere arbitrary.
+        self.toc_selected = self.toc_selected.min(self.headings.len().saturating_sub(1));
+        self.pending_jump = None;
+    }
+
     /// Read `path`, parse it, and switch keyboard focus to the reader. The
     /// page it opens on is whatever was last reached in this file, so
     /// reopening a document resumes it rather than restarting it. Markdown
@@ -357,4 +395,40 @@ impl App {
 /// still a consistent key for the life of the process.
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reloading re-reads the open file from disk, so an edit made elsewhere
+    /// shows up without closing and reopening, and the page number stays
+    /// put for the draw step to clamp rather than snapping back to the start.
+    #[test]
+    fn reload_picks_up_changes_on_disk() {
+        let path = std::env::temp_dir().join(format!("booknook-reload-{}.md", std::process::id()));
+        std::fs::write(&path, "# One\n\ntext\n").unwrap();
+        let mut app = App::new();
+        app.load_file(&path).unwrap();
+        assert_eq!(app.headings.len(), 1);
+        app.page = 7;
+
+        std::fs::write(&path, "# One\n\n# Two\n\nmore\n").unwrap();
+        app.reload();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(app.headings.len(), 2, "the new heading must appear");
+        assert_eq!(app.page, 7, "the reader stays where it was");
+    }
+
+    /// A document with no file behind it, like a gist, has nothing on disk
+    /// to go back to, so reloading leaves it exactly as it is.
+    #[test]
+    fn reload_without_a_path_is_a_noop() {
+        let mut app = App::new();
+        app.load_content("# Pasted\n\ntext\n".into(), "gist".into());
+        let blocks_before = app.blocks.len();
+        app.reload();
+        assert_eq!(app.blocks.len(), blocks_before);
+    }
 }
